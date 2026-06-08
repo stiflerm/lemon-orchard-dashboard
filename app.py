@@ -132,9 +132,11 @@ with col1:
     # TIFF PROCESSING PIPELINE (Multi-band)
     # ==========================================
     if show_lai:
-       tiff_path = "data/LEMON_ORCHARD_INDICES_MOSAIC_CLIPPED.tif"
-       
-       if os.path.exists(tiff_path):
+        # Construct absolute path for the new file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        tiff_path = os.path.join(current_dir, "data", "LAI_1.tif")
+        
+        if os.path.exists(tiff_path):
             with rasterio.open(tiff_path) as src:
                 minx, miny, maxx, maxy = transform_bounds(src.crs, 'EPSG:4326', *src.bounds)
                 image_bounds = [[miny, minx], [maxy, maxx]]
@@ -173,7 +175,7 @@ with col1:
                     opacity=0.9,
                     name='Raw TIFF UAV Overlay (Band 4)'
                 ).add_to(m)
-    else:
+        else:
             st.error(f"TIFF file not found at: {tiff_path}")
 
     # Filter targets
