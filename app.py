@@ -20,7 +20,7 @@ st.title("🍋 Orchard Diagnostic Intelligence Platform")
 def load_and_process_data():
     # 1. Construct the absolute path dynamically
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    shp_path = os.path.join(current_dir, "data", "lemon_canopies_stats.zip")
+    shp_path = os.path.join(current_dir, "data", "data.zip")
     
     # 2. Failsafe check
     if not os.path.exists(shp_path):
