@@ -18,7 +18,7 @@ st.title("🍋 Orchard Diagnostic Intelligence Platform")
 # --- 2. DATA INGESTION & CACHING ---
 @st.cache_data
 def load_and_process_data():
-    shp_path = "data/lemon_canopies_stats.shp"
+    shp_path = "zip://data/lemon_canopies_stats.zip"
     gdf = gpd.read_file(shp_path)
     gdf = gdf.drop_duplicates(subset=['tree_id'])
     
