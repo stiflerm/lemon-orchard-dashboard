@@ -1,3 +1,6 @@
+import zipfile
+import tempfile
+import os
 import streamlit as st
 import geopandas as gpd
 import folium
@@ -18,7 +21,6 @@ st.title("🍋 Orchard Diagnostic Intelligence Platform")
 # --- 2. DATA INGESTION & CACHING ---
 @st.cache_data
 def load_and_process_data():
-    # 1. Define the physical path to check existence
     current_dir = os.path.dirname(os.path.abspath(__file__))
     physical_path = os.path.join(current_dir, "data", "data.zip")
     
@@ -26,14 +28,26 @@ def load_and_process_data():
         st.error(f"File not found on server: {physical_path}")
         st.stop()
         
-    # 2. Construct the URI for the Pyogrio engine
-    shp_uri = f"zip://{physical_path}"
-    
-    # 3. Read the file
-    gdf = gpd.read_file(shp_uri)
+    # Extract the zip file into the server's temporary directory
+    temp_dir = tempfile.mkdtemp()
+    with zipfile.ZipFile(physical_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+        
+    # Dynamically find the .shp file anywhere inside the extracted folder
+    shp_file = None
+    for root, dirs, files in os.walk(temp_dir):
+        for file in files:
+            if file.endswith(".shp"):
+                shp_file = os.path.join(root, file)
+                break
+                
+    if not shp_file:
+        st.error("No .shp file was found inside data.zip.")
+        st.stop()
+        
+    # Read the file directly from the temporary unzipped location
+    gdf = gpd.read_file(shp_file)
     gdf = gdf.drop_duplicates(subset=['tree_id'])
-    
-    # ... [Keep all your existing threshold calculations and Flag logic below this] ...
     
     # Calculate thresholds
     ndvi_mean = gdf['NDVI_mn'].mean()
