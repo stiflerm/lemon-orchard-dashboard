@@ -18,9 +18,20 @@ st.title("🍋 Orchard Diagnostic Intelligence Platform")
 # --- 2. DATA INGESTION & CACHING ---
 @st.cache_data
 def load_and_process_data():
-    shp_path = "data/lemon_canopies_stats.zip"
+    # 1. Construct the absolute path dynamically
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    shp_path = os.path.join(current_dir, "data", "lemon_canopies_stats.zip")
+    
+    # 2. Failsafe check
+    if not os.path.exists(shp_path):
+        st.error(f"File not found on server. Looking exactly here: {shp_path}")
+        st.stop()
+        
+    # 3. Read the file
     gdf = gpd.read_file(shp_path)
     gdf = gdf.drop_duplicates(subset=['tree_id'])
+    
+    # ... [Keep all your existing threshold calculations and Flag logic below this] ...
     
     # Calculate thresholds
     ndvi_mean = gdf['NDVI_mn'].mean()
