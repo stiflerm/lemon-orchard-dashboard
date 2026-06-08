@@ -144,7 +144,7 @@ with col1:
                 scale = min(1.0, 1500.0 / src.width)
                 out_shape = (int(src.height * scale), int(src.width * scale))
                 
-                lai_data = src.read(4, out_shape=out_shape, resampling=rasterio.enums.Resampling.nearest)
+                lai_data = src.read(1, out_shape=out_shape, resampling=rasterio.enums.Resampling.nearest)
                 lai_data = np.nan_to_num(lai_data, nan=-9999.0)
                 
                 nodata = src.nodata if src.nodata is not None else -9999.0
