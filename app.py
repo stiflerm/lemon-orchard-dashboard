@@ -18,17 +18,19 @@ st.title("🍋 Orchard Diagnostic Intelligence Platform")
 # --- 2. DATA INGESTION & CACHING ---
 @st.cache_data
 def load_and_process_data():
-    # 1. Construct the absolute path dynamically
+    # 1. Define the physical path to check existence
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    shp_path = os.path.join(current_dir, "data", "data.zip")
+    physical_path = os.path.join(current_dir, "data", "data.zip")
     
-    # 2. Failsafe check
-    if not os.path.exists(shp_path):
-        st.error(f"File not found on server. Looking exactly here: {shp_path}")
+    if not os.path.exists(physical_path):
+        st.error(f"File not found on server: {physical_path}")
         st.stop()
         
+    # 2. Construct the URI for the Pyogrio engine
+    shp_uri = f"zip://{physical_path}"
+    
     # 3. Read the file
-    gdf = gpd.read_file(shp_path)
+    gdf = gpd.read_file(shp_uri)
     gdf = gdf.drop_duplicates(subset=['tree_id'])
     
     # ... [Keep all your existing threshold calculations and Flag logic below this] ...
