@@ -65,25 +65,13 @@ def load_and_process_data():
     cri1_sd_75 = gdf['CRI1_sd'].quantile(0.75)
     pri_25 = gdf['PRI_mn'].quantile(0.25)
     
-    # 3D CHM Thresholds
-    if 'CHM_max' in gdf.columns:
-        chm_max_25 = gdf['CHM_max'].quantile(0.25)
-    else:
-        gdf['CHM_max'] = 1.0 
-        chm_max_25 = 0.5
-
     # Apply Logic Flags
-    # Flag A: WBI vs NDVI
     gdf['Flag_A'] = (gdf['WBI_mn'] < wbi_25) & (gdf['NDVI_mn'] > ndvi_25) 
-    # Flag B: NDVI vs MCARI
     gdf['Flag_B'] = (gdf['NDVI_mn'] > ndvi_mean) & (gdf['MCARI_mn'] < mcari_25) 
-    # Flag C: Radius vs LAI vs PSRI (Reverted to 2D Logic)
     gdf['Flag_C'] = (gdf['Radius_m'] > radius_mean) & (gdf['LAI_mn'] < lai_25) & (gdf['PSRI_mn'] > psri_75)
-    # Flag E: Variance Logic
     gdf['Flag_D'] = (gdf['NDVI_mn'] > ndvi_25) & (gdf['NDVI_sd'] > ndvi_sd_75) & (gdf['CRI1_sd'] > cri1_sd_75) & (gdf['NDVI_mi'] < ndvi_mi_25) 
-    # Flag F: PRI Drop
     gdf['Flag_E'] = (gdf['PRI_mn'] < pri_25) & (gdf['LAI_mn'] > lai_25) & (gdf['WBI_mn'] > wbi_25) & (gdf['PSRI_mn'] > psri_mean) 
-    # Flag H: NEW - CHM Stunted Growth Logic
+    
     # CHM Profiling Logic: Keeps all valid trees (filtering out ground weeds < 0.5m)
     if 'CHM_max' in gdf.columns:
         gdf['CHM_PROFILE'] = gdf['CHM_max'] >= 0.5
@@ -124,44 +112,44 @@ st.sidebar.header("Diagnostic Controls")
 scenario_dict = {
     'Flag_A': (
         'A: Target Irrigation (Drought)', 'blue', 'Focuses on canopies with low water absorption but stable physical structure.',
-        '''**1. Inputs Used:** WBI (Water Band Index) and NDVI.
-**2. What They Indicate:** WBI detects physical canopy water content. NDVI detects active chlorophyll.
-**3. Scientific Conclusion:** The threshold targets trees with WBI in the bottom 25%, but NDVI in the top 75%. Because the tree is highly green but severely lacking water, we conclude it is structurally intact but actively dehydrating, requiring immediate irrigation before xylem damage occurs.'''
+        '''**1. Inputs Used:** WBI_mn (Water Band Index), NDVI_mn.
+**2. Purpose:** WBI monitors plant water status; NDVI tracks chlorophyll-driven vigor.
+**3. Scientific Conclusion:** Targets trees with minimal water status but high chlorophyll vigor. Identifies early-stage physiological drought where the tree maintains greenness but is actively dehydrating, requiring immediate irrigation.'''
     ),
     'Flag_B': (
         'B: Target Fertilizer (Hidden Hunger)', 'purple', 'Identifies physically large canopies with low chlorophyll/nitrogen concentration.',
-        '''**1. Inputs Used:** NDVI and MCARI.
-**2. What They Indicate:** NDVI indicates overall biomass/vigor. MCARI is highly sensitive to variations in leaf chlorophyll (correlating to Nitrogen).
-**3. Scientific Conclusion:** Targets trees with above-average NDVI but MCARI in the bottom 25%. This indicates the tree has mature physical volume but lacks internal nutrient density ("hidden hunger"), signaling a need for targeted Nitrogen application.'''
+        '''**1. Inputs Used:** NDVI_mn, MCARI_mn (Modified Chlorophyll Absorption).
+**2. Purpose:** NDVI captures total biomass; MCARI isolates chlorophyll concentration from structural interference.
+**3. Scientific Conclusion:** Targets trees with high biomass but minimal chlorophyll. This mismatch indicates hidden hunger where trees are structurally mature but nitrogen-deficient.'''
     ),
     'Flag_C': (
         'C: Inspect Root Rot (Decline)', 'red', 'Flags mature trees exhibiting systemic thinning and active leaf breakdown.',
-        '''**1. Inputs Used:** Canopy Radius, LAI (Leaf Area Index), and PSRI (Plant Senescence Reflectance Index).
-**2. What They Indicate:** Radius indicates horizontal 2D maturity. LAI measures leaf density. PSRI spikes when cellular breakdown occurs and canopy carotenoids/brown pigments become dominant.
-**3. Scientific Conclusion:** Targets trees that are physically wide (mature), but have bottom 25% LAI and top 25% PSRI. This 2D signature confirms a mature tree that is rapidly defoliating and breaking down cellularly.'''
+        '''**1. Inputs Used:** Radius_m, LAI_mn, PSRI_mn (Plant Senescence Reflectance).
+**2. Purpose:** Radius tracks growth stage; LAI monitors canopy leaf area; PSRI captures stress-induced pigment changes.
+**3. Scientific Conclusion:** Targets mature trees with low leaf area and high senescence. This signature indicates potential root-zone decay, forcing leaf shedding and cellular breakdown.'''
     ),
     'Flag_D': (
-        'D: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage on specific branches.',
-        '''**1. Inputs Used:** NDVI_mn (Mean), NDVI_sd (Standard Deviation), NDVI_mi (Minimum), and CRI1_sd (Carotenoid Variance).
-**2. What They Indicate:** Mean NDVI confirms baseline viability. Minimum NDVI isolates pockets of dead tissue. Standard deviation metrics quantify asymmetric intra-canopy stress—the contrast between healthy chlorophyll and chlorotic sectors within the same tree.
-**3. Scientific Conclusion:** Targets trees maintaining acceptable overall vigor, but exhibiting extreme internal spectral variance alongside a severe localized drop in health. This asymmetric degradation is the precise spectral signature of a localized foliar pathogen or acute pest infestation, distinguishing it from systemic issues like water or nutrient stress.'''
+        'D: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage.',
+        '''**1. Inputs Used:** NDVI_mn, NDVI_sd (Standard Deviation), NDVI_mi (Minimum), CRI1_sd (Carotenoid Variance).
+**2. Purpose:** Standard deviation metrics quantify asymmetric intra-canopy stress; minimum NDVI isolates pockets of dead tissue.
+**3. Scientific Conclusion:** Targets trees with acceptable overall vigor but extreme internal spectral variance. This asymmetry is the precise spectral signature of a localized foliar pathogen or acute pest infestation on specific branches.'''
     ),
     'Flag_E': (
         'E: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure and hydration remain stable.',
-        '''**1. Inputs Used:** PRI (Photochemical Reflectance Index), LAI, WBI, and PSRI.
-**2. What They Indicate:** PRI is a direct proxy for the xanthophyll cycle and photosynthetic light-use efficiency. 
-**3. Scientific Conclusion:** Targets trees with normal leaf density and water content, but heavily suppressed PRI. Photosynthetic efficiency has shut down due to sudden environmental temperature shock, even though the leaves are still physically green and attached.'''
+        '''**1. Inputs Used:** PRI_mn (Photochemical Reflectance Index), LAI_mn, WBI_mn, PSRI_mn.
+**2. Purpose:** PRI captures light-use efficiency; other indices ensure structure/water levels remain nominal.
+**3. Scientific Conclusion:** Targets trees with high structure/water but suppressed PRI. This indicates the light-harvesting mechanism has shut down due to acute thermal stress, despite the canopy appearing physically intact.'''
     ),
-    'Flag_F': (
-        'F: Canopy Height Profiling (CHM)', 'green', 'Maps the absolute vertical height of all established canopies.',
+    'CHM_PROFILE': (
+        '🌳 Canopy Height Profiling (CHM)', 'green', 'Maps the absolute vertical height of all established canopies.',
         '''**1. Inputs Used:** CHM_max (Peak Canopy Height).
 **2. Purpose:** Isolates 3D structural data from 2D spectral greenness, stripping away flat ground weeds.
-**3. Scientific Conclusion:** Rather than flagging anomalies, this maps the baseline vertical mass of the block. By displaying every canopy taller than 0.5m, it allows for a direct visual assessment of orchard uniformity, pruning efficiency, and spatial growth gradients across different soil zones.'''
+**3. Scientific Conclusion:** Maps the baseline vertical mass of the block. By displaying every canopy taller than 0.5m, it allows for a direct visual assessment of orchard uniformity, pruning efficiency, and spatial growth gradients.'''
     ),
     'GAP_ANALYSIS': (
         '🍋 Geometric Gap & Yield Analysis', 'red', 'Calculates missing trees and yield loss percentage based on spatial canopy architecture.',
         '''**1. Inputs Used:** Geometric Centroids, X/Y Coordinates, and 2D Proximity.
-**2. What They Indicate:** Evaluates the physical distance between existing canopy centroids along computed planting rows.
+**2. Purpose:** Evaluates the physical distance between existing canopy centroids along computed planting rows.
 **3. Scientific Conclusion:** Utilizes Agglomerative Clustering to flatten row topology, extrapolating planting points where the distance between adjacent trees exceeds the 5.5m expected spacing. Yields a direct count of missing crop positions.'''
     )
 }
@@ -229,7 +217,11 @@ if selected_scenario == 'GAP_ANALYSIS':
     yield_loss_percentage = (total_gaps / ideal_capacity) * 100 if ideal_capacity > 0 else 0.0
 
 else:
-    target_gdf = gdf[gdf[selected_scenario] == True]
+    # Safely pull the target gdf based on the selected flag
+    if selected_scenario in gdf.columns:
+        target_gdf = gdf[gdf[selected_scenario] == True]
+    else:
+        target_gdf = gpd.GeoDataFrame()
     color = scenario_dict[selected_scenario][1]
 
 # --- 6. MAIN VISUALIZATION LAYOUT ---
@@ -268,41 +260,24 @@ with col1:
                 ).add_to(m)
 
     if show_canopies:
-        if selected == 'GAP_ANALYSIS':
-            folium.GeoJson(
-                gdf, 
-                style_function=lambda x: {'fillColor': 'none', 'color': '#00FFCC', 'weight': 1.5, 'fillOpacity': 0.0}, 
-                name="Orchard Canopies"
-            ).add_to(m)
-            
+        if selected_scenario == 'GAP_ANALYSIS':
+            folium.GeoJson(gdf, style_function=lambda x: {'fillColor': 'none', 'color': '#00FFCC', 'weight': 1.5, 'fillOpacity': 0.0}, name="Orchard Canopies").add_to(m)
             for idx, row in gaps_folium_gdf.iterrows():
                 folium.CircleMarker(
-                    location=[row.geometry.y, row.geometry.x], 
-                    radius=5, 
-                    color='#000000', 
-                    weight=2.0, 
-                    fill=True, 
-                    fill_color='#FFFFFF', 
-                    fill_opacity=1.0, 
-                    tooltip="Calculated Crop Gap"
+                    location=[row.geometry.y, row.geometry.x], radius=5, color='#000000', weight=2.0, fill=True, fill_color='#FFFFFF', fill_opacity=1.0, tooltip="Calculated Crop Gap"
                 ).add_to(m)
         else:
             if not target_gdf.empty:
-                # Define the tooltip first
+                # Dynamic Hover Tooltip: Automatically populates available metrics
+                available_fields = [f for f in ['tree_id', 'CHM_max', 'Radius_m', 'NDVI_mn', 'LAI_mn', 'WBI_mn', 'MCARI_mn', 'PSRI_mn', 'PRI_mn'] if f in gdf.columns]
+                available_aliases = [f"{f}:" for f in available_fields]
+                
                 tooltip = folium.GeoJsonTooltip(
-                    fields=[
-                        'tree_id', 'CHM_max', 'Radius_m', 'NDVI_mn', 
-                        'LAI_mn', 'WBI_mn', 'MCARI_mn', 'PSRI_mn', 'PRI_mn'
-                    ], 
-                    aliases=[
-                        'Tree ID:', 'Peak Height (m):', 'Radius (m):', 'NDVI (Vigor):', 
-                        'LAI (Density):', 'WBI (Water):', 'MCARI (Chlorophyll):', 
-                        'PSRI (Senescence):', 'PRI (Photosynthesis):'
-                    ],
+                    fields=available_fields, 
+                    aliases=available_aliases,
                     localize=True
                 )
                 
-                # Then pass it to the GeoJson layer
                 folium.GeoJson(
                     target_gdf, 
                     style_function=lambda x: {'fillColor': color, 'color': 'white', 'weight': 2.0, 'fillOpacity': 0.7}, 
@@ -322,23 +297,3 @@ with col2:
     
     if selected_scenario == 'GAP_ANALYSIS':
         st.metric(label="Total Orchard Trees", value=total_trees)
-        st.metric(label="Calculated Crop Gaps", value=total_gaps)
-        st.metric(label="Total Yield Loss", value=f"{yield_loss_percentage:.2f}%")
-        
-        st.markdown("---")
-        st.header("📥 Export Gaps")
-        if not gaps_folium_gdf.empty:
-            st.download_button(label=f"Download {total_gaps} Gaps (GeoJSON)", data=gaps_folium_gdf.to_json(), file_name="calculated_orchard_gaps.geojson", mime="application/geo+json")
-    else:
-        target_count, total_trees = len(target_gdf), len(gdf)
-        st.metric(label="Targeted Trees", value=target_count, delta=f"{(target_count / total_trees * 100) if total_trees > 0 else 0:.1f}% of block", delta_color="inverse")
-            
-        if target_count > 0:
-            fig = plot_spectral_signature(target_gdf, gdf)
-            if fig is not None:
-                st.pyplot(fig)
-        
-        st.markdown("---")
-        st.header("📥 Export Targets")
-        if not target_gdf.empty:
-            st.download_button(label=f"Download {target_count} Targets (GeoJSON)", data=target_gdf.to_json(), file_name=f"field_targets_{selected_scenario}.geojson", mime="application/geo+json")
