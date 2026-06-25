@@ -276,7 +276,43 @@ with col1:
                 ).add_to(m)
         else:
             if not target_gdf.empty:
-                folium.GeoJson(target_gdf, style_function=lambda x: {'fillColor': color, 'color': 'white', 'weight': 2.0, 'fillOpacity': 0.7}, tooltip=folium.GeoJsonTooltip(fields=['tree_id', 'NDVI_mn'], aliases=['Tree ID:', 'NDVI:'])).add_to(m)
+                folium.GeoJson(target_gdf, style_function=lambda x: {'fillColor': color, 'color': 'white', 'weight': 2.0, 'fillOpacity': 0.7}, if not target_gdf.empty:
+                tooltip = folium.GeoJsonTooltip(
+                    fields=[
+                        'tree_id', 
+                        'CHM_max', 
+                        'Radius_m', 
+                        'NDVI_mn', 
+                        'LAI_mn', 
+                        'WBI_mn', 
+                        'MCARI_mn', 
+                        'PSRI_mn', 
+                        'PRI_mn'
+                    ], 
+                    aliases=[
+                        'Tree ID:', 
+                        'Peak Height (m):', 
+                        'Radius (m):', 
+                        'NDVI (Vigor):', 
+                        'LAI (Density):', 
+                        'WBI (Water):', 
+                        'MCARI (Chlorophyll):', 
+                        'PSRI (Senescence):', 
+                        'PRI (Photosynthesis):'
+                    ],
+                    localize=True
+                )
+                
+                folium.GeoJson(
+                    target_gdf, 
+                    style_function=lambda x: {
+                        'fillColor': color, 
+                        'color': 'white', 
+                        'weight': 2.0, 
+                        'fillOpacity': 0.7
+                    }, 
+                    tooltip=tooltip
+                ).add_to(m)
 
     folium.LayerControl().add_to(m)
     components.html(m._repr_html_(), height=650)
