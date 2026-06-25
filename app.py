@@ -120,45 +120,45 @@ st.sidebar.header("Diagnostic Controls")
 scenario_dict = {
     'Flag_A': (
         'A: Target Irrigation (Drought)', 'blue', 'Focuses on canopies with low water absorption but stable physical structure.',
-        '''**1. Inputs Used:** WBI (Water Band Index) and NDVI.
-**2. What They Indicate:** WBI detects physical canopy water content. NDVI detects active chlorophyll.
-**3. Scientific Conclusion:** The threshold targets trees with WBI in the bottom 25%, but NDVI in the top 75%. Because the tree is highly green but severely lacking water, we conclude it is structurally intact but actively dehydrating, requiring immediate irrigation before xylem damage occurs.'''
+        '''**1. Inputs Used:** WBI_min (Water Band Index Minimum), NDVI_mean.
+**2. Purpose:** WBI monitors plant water status; NDVI_mean tracks chlorophyll-driven vigor.
+**3. Scientific Conclusion:** Targets trees with minimal water status but high chlorophyll vigor. This identifies "early-stage physiological drought" where the tree maintains greenness but has depleted its internal water reserves, signaling the need for immediate irrigation before irreversible wilting occurs.'''
     ),
     'Flag_B': (
         'B: Target Fertilizer (Hidden Hunger)', 'purple', 'Identifies physically large canopies with low chlorophyll/nitrogen concentration.',
-        '''**1. Inputs Used:** NDVI and MCARI.
-**2. What They Indicate:** NDVI indicates overall biomass/vigor. MCARI is highly sensitive to variations in leaf chlorophyll (correlating to Nitrogen).
-**3. Scientific Conclusion:** Targets trees with above-average NDVI but MCARI in the bottom 25%. This indicates the tree has mature physical volume but lacks internal nutrient density ("hidden hunger"), signaling a need for targeted Nitrogen application.'''
+        '''**1. Inputs Used:** NDVI_mean, MCARI_min (Modified Chlorophyll Absorption).
+**2. Purpose:** NDVI_mean captures total biomass; MCARI_min isolates chlorophyll concentration from structural interference.
+**3. Scientific Conclusion:** Targets trees with high biomass but minimal chlorophyll. This mismatch indicates "hidden hunger" where trees are structurally mature but nitrogen-deficient, requiring variable-rate fertilization.'''
     ),
     'Flag_C': (
         'C: Inspect Root Rot (Decline)', 'red', 'Flags mature trees exhibiting systemic thinning and active leaf breakdown.',
-        '''**1. Inputs Used:** Radius_m, LAI (Leaf Area Index), and PSRI (Plant Senescence Reflectance Index).
-**2. What They Indicate:** Radius indicates horizontal 2D maturity. LAI measures leaf density. PSRI spikes when cellular breakdown occurs and canopy carotenoids/brown pigments become dominant.
-**3. Scientific Conclusion:** Targets trees that are physically wide (mature), but have bottom 25% LAI and top 25% PSRI. This 2D signature confirms a mature tree that is rapidly defoliating and breaking down cellularly.'''
+        '''**1. Inputs Used:** Radius_m, LAI_mean, PSRI_max (Plant Senescence Reflectance).
+**2. Purpose:** Radius tracks growth stage; LAI monitors canopy leaf area; PSRI_max captures stress-induced pigment changes.
+**3. Scientific Conclusion:** Targets mature trees (Radius) with low leaf area and high senescence (PSRI). This signature is indicative of root-zone decay, where reduced nutrient uptake forces leaf shedding and cellular senescence.'''
     ),
-    'Flag_D': (
-        'E: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage on specific branches.',
-        '''**1. Inputs Used:** NDVI, NDVI_sd (Standard Deviation), and CRI1_sd.
-**2. What They Indicate:** Standard deviation metrics measure how much a value fluctuates *inside* a single tree canopy polygon.
-**3. Scientific Conclusion:** Filters for trees with decent overall health but top 25% internal variance. High internal variance indicates one side of the tree is healthy while the other side is rapidly degrading—the exact spatial signature of a localized pest or pathogen attack on specific branches.'''
+    'Flag_E': (
+        'E: Spot-Spray (Localized Pests)', 'darkred', 'Identifies asymmetric intra-canopy stress signature.',
+        '''**1. Inputs Used:** NDVI_mean, NDVI_std (Standard Deviation), NDVI_min, CRI1_std (Carotenoid Variance).
+**2. Purpose:** NDVI_min detects local pockets of necrosis; standard deviation metrics quantify internal spectral variance.
+**3. Scientific Conclusion:** Targets trees with high average health but high internal variance. This asymmetry—where one sector of the canopy is healthy while another exhibits necrosis—is the pathognomonic spectral signature of localized pest or pathogen infestation.'''
     ),
     'Flag_F': (
-        'F: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure and hydration remain stable.',
-        '''**1. Inputs Used:** PRI (Photochemical Reflectance Index), LAI, WBI, and PSRI.
-**2. What They Indicate:** PRI is a direct proxy for the xanthophyll cycle and photosynthetic light-use efficiency. 
-**3. Scientific Conclusion:** Targets trees with normal leaf density and water content, but heavily suppressed PRI. Photosynthetic efficiency has shut down due to sudden environmental temperature shock, even though the leaves are still physically green and attached.'''
+        'F: Acute Heat/Frost Shock', 'cyan', 'Detects sudden photosynthetic shutdown via PRI drop.',
+        '''**1. Inputs Used:** PRI_min (Photochemical Reflectance Index), LAI_mean, WBI_mean, PSRI_mean.
+**2. Purpose:** PRI captures light-use efficiency; other indices ensure structure/water levels remain nominal.
+**3. Scientific Conclusion:** Targets trees with high structure/water but suppressed PRI. This indicates the light-harvesting mechanism (xanthophyll cycle) has shut down due to acute thermal stress, despite the canopy appearing physically intact.'''
     ),
     'Flag_H': (
-        'H: Stunted Growth (Height Anomaly)', 'magenta', 'Isolates trees that are structurally stunted despite maintaining high internal vigor.',
-        '''**1. Inputs Used:** CHM_max (Peak Canopy Height) and NDVI.
-**2. What They Indicate:** CHM_max measures absolute 3D vertical height. NDVI measures overall vegetative greenness.
-**3. Scientific Conclusion:** Targets trees with above-average greenness but peak heights in the bottom 25% of the block. This indicates the canopy is highly vigorous but failing to gain vertical mass, suggesting severe root-zone confinement, hardpan soil limitations, or recent aggressive mechanical top-pruning.'''
+        'H: Stunted Growth (Height Anomaly)', 'magenta', 'Isolates trees with limited vertical mass vs. high vigor.',
+        '''**1. Inputs Used:** CHM_max (Canopy Height Model Peak), NDVI_mean.
+**2. Purpose:** CHM_max measures structural height; NDVI_mean confirms vegetative metabolism.
+**3. Scientific Conclusion:** Targets trees with high photosynthetic metabolism but bottom-tier structural height. This suggests localized soil compaction (hardpan) or root restriction preventing vertical development, regardless of top-tier health.'''
     ),
     'GAP_ANALYSIS': (
-        '🍋 Geometric Gap & Yield Analysis', 'red', 'Calculates missing trees and yield loss percentage based on spatial canopy architecture.',
-        '''**1. Inputs Used:** Geometric Centroids, X/Y Coordinates, and 2D Proximity.
-**2. What They Indicate:** Evaluates the physical distance between existing canopy centroids along computed planting rows.
-**3. Scientific Conclusion:** Utilizes Agglomerative Clustering to flatten row topology, extrapolating planting points where the distance between adjacent trees exceeds the 5.5m expected spacing. Yields a direct count of missing crop positions.'''
+        '🍋 Geometric Gap & Yield Analysis', 'red', 'Calculates missing trees and yield loss.',
+        '''**1. Inputs Used:** Geometric Centroids, X/Y Proximity.
+**2. Purpose:** Measures deviation from standardized 5.5m orchard planting grids.
+**3. Scientific Conclusion:** Extrapolates gaps where spatial distance exceeds planting protocol thresholds, accounting for geometric row alignment to verify precise yield loss locations.'''
     )
 }
 
