@@ -136,11 +136,11 @@ scenario_dict = {
 **2. What They Indicate:** Radius indicates horizontal 2D maturity. LAI measures leaf density. PSRI spikes when cellular breakdown occurs and canopy carotenoids/brown pigments become dominant.
 **3. Scientific Conclusion:** Targets trees that are physically wide (mature), but have bottom 25% LAI and top 25% PSRI. This 2D signature confirms a mature tree that is rapidly defoliating and breaking down cellularly.'''
     ),
-    'Flag_E': (
+    'Flag_D': (
         'E: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage on specific branches.',
-        '''**1. Inputs Used:** NDVI_mn (Mean), NDVI_sd (Standard Deviation), NDVI_mi (Minimum), and CRI1_sd (Carotenoid Variance).
-**2. What They Indicate:** Mean NDVI confirms baseline viability. Minimum NDVI isolates pockets of dead tissue. Standard deviation metrics quantify asymmetric intra-canopy stress—the contrast between healthy chlorophyll and chlorotic sectors within the same tree.
-**3. Scientific Conclusion:** Targets trees maintaining acceptable overall vigor, but exhibiting extreme internal spectral variance alongside a severe localized drop in health. This asymmetric degradation is the precise spectral signature of a localized foliar pathogen or acute pest infestation, distinguishing it from systemic issues like water or nutrient stress.'''
+        '''**1. Inputs Used:** NDVI, NDVI_sd (Standard Deviation), and CRI1_sd.
+**2. What They Indicate:** Standard deviation metrics measure how much a value fluctuates *inside* a single tree canopy polygon.
+**3. Scientific Conclusion:** Filters for trees with decent overall health but top 25% internal variance. High internal variance indicates one side of the tree is healthy while the other side is rapidly degrading—the exact spatial signature of a localized pest or pathogen attack on specific branches.'''
     ),
     'Flag_F': (
         'F: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure and hydration remain stable.',
