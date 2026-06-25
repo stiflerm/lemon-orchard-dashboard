@@ -136,7 +136,7 @@ scenario_dict = {
 **2. Purpose:** Radius tracks growth stage; LAI monitors canopy leaf area; PSRI_max captures stress-induced pigment changes.
 **3. Scientific Conclusion:** Targets mature trees (Radius) with low leaf area and high senescence (PSRI). This signature is indicative of root-zone decay, where reduced nutrient uptake forces leaf shedding and cellular senescence.'''
     ),
-    'Flag_E': (
+    'Flag_D': (
         'E: Spot-Spray (Localized Pests)', 'darkred', 'Identifies asymmetric intra-canopy stress signature.',
         '''**1. Inputs Used:** NDVI_mean, NDVI_std (Standard Deviation), NDVI_min, CRI1_std (Carotenoid Variance).
 **2. Purpose:** NDVI_min detects local pockets of necrosis; standard deviation metrics quantify internal spectral variance.
