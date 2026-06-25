@@ -82,9 +82,9 @@ def load_and_process_data():
     # Flag E: Variance Logic
     gdf['Flag_D'] = (gdf['NDVI_mn'] > ndvi_25) & (gdf['NDVI_sd'] > ndvi_sd_75) & (gdf['CRI1_sd'] > cri1_sd_75) & (gdf['NDVI_mi'] < ndvi_mi_25) 
     # Flag F: PRI Drop
-    gdf['Flag_F'] = (gdf['PRI_mn'] < pri_25) & (gdf['LAI_mn'] > lai_25) & (gdf['WBI_mn'] > wbi_25) & (gdf['PSRI_mn'] > psri_mean) 
+    gdf['Flag_E'] = (gdf['PRI_mn'] < pri_25) & (gdf['LAI_mn'] > lai_25) & (gdf['WBI_mn'] > wbi_25) & (gdf['PSRI_mn'] > psri_mean) 
     # Flag H: NEW - CHM Stunted Growth Logic
-    gdf['Flag_H'] = (gdf['CHM_max'] < chm_max_25) & (gdf['NDVI_mn'] > ndvi_mean)
+    gdf['Flag_F'] = (gdf['CHM_max'] < chm_max_25) & (gdf['NDVI_mn'] > ndvi_mean)
     
     return gdf.to_crs(epsg=4326)
 
@@ -142,13 +142,13 @@ scenario_dict = {
 **2. Purpose:** NDVI_min detects local pockets of necrosis; standard deviation metrics quantify internal spectral variance.
 **3. Scientific Conclusion:** Targets trees with high average health but high internal variance. This asymmetry—where one sector of the canopy is healthy while another exhibits necrosis—is the pathognomonic spectral signature of localized pest or pathogen infestation.'''
     ),
-    'Flag_F': (
+    'Flag_E': (
         'F: Acute Heat/Frost Shock', 'cyan', 'Detects sudden photosynthetic shutdown via PRI drop.',
         '''**1. Inputs Used:** PRI_min (Photochemical Reflectance Index), LAI_mean, WBI_mean, PSRI_mean.
 **2. Purpose:** PRI captures light-use efficiency; other indices ensure structure/water levels remain nominal.
 **3. Scientific Conclusion:** Targets trees with high structure/water but suppressed PRI. This indicates the light-harvesting mechanism (xanthophyll cycle) has shut down due to acute thermal stress, despite the canopy appearing physically intact.'''
     ),
-    'Flag_H': (
+    'Flag_F': (
         'H: Stunted Growth (Height Anomaly)', 'magenta', 'Isolates trees with limited vertical mass vs. high vigor.',
         '''**1. Inputs Used:** CHM_max (Canopy Height Model Peak), NDVI_mean.
 **2. Purpose:** CHM_max measures structural height; NDVI_mean confirms vegetative metabolism.
