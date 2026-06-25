@@ -80,7 +80,7 @@ def load_and_process_data():
     # Flag C: Radius vs LAI vs PSRI (Reverted to 2D Logic)
     gdf['Flag_C'] = (gdf['Radius_m'] > radius_mean) & (gdf['LAI_mn'] < lai_25) & (gdf['PSRI_mn'] > psri_75)
     # Flag E: Variance Logic
-    gdf['Flag_E'] = (gdf['NDVI_mn'] > ndvi_25) & (gdf['NDVI_sd'] > ndvi_sd_75) & (gdf['CRI1_sd'] > cri1_sd_75) & (gdf['NDVI_mi'] < ndvi_mi_25) 
+    gdf['Flag_D'] = (gdf['NDVI_mn'] > ndvi_25) & (gdf['NDVI_sd'] > ndvi_sd_75) & (gdf['CRI1_sd'] > cri1_sd_75) & (gdf['NDVI_mi'] < ndvi_mi_25) 
     # Flag F: PRI Drop
     gdf['Flag_F'] = (gdf['PRI_mn'] < pri_25) & (gdf['LAI_mn'] > lai_25) & (gdf['WBI_mn'] > wbi_25) & (gdf['PSRI_mn'] > psri_mean) 
     # Flag H: NEW - CHM Stunted Growth Logic
@@ -138,9 +138,9 @@ scenario_dict = {
     ),
     'Flag_E': (
         'E: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage on specific branches.',
-        '''**1. Inputs Used:** NDVI, NDVI_sd (Standard Deviation), and CRI1_sd.
-**2. What They Indicate:** Standard deviation metrics measure how much a value fluctuates *inside* a single tree canopy polygon.
-**3. Scientific Conclusion:** Filters for trees with decent overall health but top 25% internal variance. High internal variance indicates one side of the tree is healthy while the other side is rapidly degrading—the exact spatial signature of a localized pest or pathogen attack on specific branches.'''
+        '''**1. Inputs Used:** NDVI_mn (Mean), NDVI_sd (Standard Deviation), NDVI_mi (Minimum), and CRI1_sd (Carotenoid Variance).
+**2. What They Indicate:** Mean NDVI confirms baseline viability. Minimum NDVI isolates pockets of dead tissue. Standard deviation metrics quantify asymmetric intra-canopy stress—the contrast between healthy chlorophyll and chlorotic sectors within the same tree.
+**3. Scientific Conclusion:** Targets trees maintaining acceptable overall vigor, but exhibiting extreme internal spectral variance alongside a severe localized drop in health. This asymmetric degradation is the precise spectral signature of a localized foliar pathogen or acute pest infestation, distinguishing it from systemic issues like water or nutrient stress.'''
     ),
     'Flag_F': (
         'F: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure and hydration remain stable.',
