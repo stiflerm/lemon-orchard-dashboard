@@ -1,6 +1,8 @@
 streamlit==1.32.0
 geopandas
 folium
+numpy
 rasterio
 matplotlib
-numpy
+scikit-learn
+shapely
