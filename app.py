@@ -268,49 +268,44 @@ with col1:
                 ).add_to(m)
 
     if show_canopies:
-        if selected_scenario == 'GAP_ANALYSIS':
-            folium.GeoJson(gdf, style_function=lambda x: {'fillColor': 'none', 'color': '#00FFCC', 'weight': 1.5, 'fillOpacity': 0.0}, name="Orchard Canopies").add_to(m)
+        if selected == 'GAP_ANALYSIS':
+            folium.GeoJson(
+                gdf, 
+                style_function=lambda x: {'fillColor': 'none', 'color': '#00FFCC', 'weight': 1.5, 'fillOpacity': 0.0}, 
+                name="Orchard Canopies"
+            ).add_to(m)
+            
             for idx, row in gaps_folium_gdf.iterrows():
                 folium.CircleMarker(
-                    location=[row.geometry.y, row.geometry.x], radius=5, color='#000000', weight=2.0, fill=True, fill_color='#FFFFFF', fill_opacity=1.0, tooltip="Calculated Crop Gap"
+                    location=[row.geometry.y, row.geometry.x], 
+                    radius=5, 
+                    color='#000000', 
+                    weight=2.0, 
+                    fill=True, 
+                    fill_color='#FFFFFF', 
+                    fill_opacity=1.0, 
+                    tooltip="Calculated Crop Gap"
                 ).add_to(m)
         else:
             if not target_gdf.empty:
-                folium.GeoJson(target_gdf, style_function=lambda x: {'fillColor': color, 'color': 'white', 'weight': 2.0, 'fillOpacity': 0.7}, if not target_gdf.empty:
+                # Define the tooltip first
                 tooltip = folium.GeoJsonTooltip(
                     fields=[
-                        'tree_id', 
-                        'CHM_max', 
-                        'Radius_m', 
-                        'NDVI_mn', 
-                        'LAI_mn', 
-                        'WBI_mn', 
-                        'MCARI_mn', 
-                        'PSRI_mn', 
-                        'PRI_mn'
+                        'tree_id', 'CHM_max', 'Radius_m', 'NDVI_mn', 
+                        'LAI_mn', 'WBI_mn', 'MCARI_mn', 'PSRI_mn', 'PRI_mn'
                     ], 
                     aliases=[
-                        'Tree ID:', 
-                        'Peak Height (m):', 
-                        'Radius (m):', 
-                        'NDVI (Vigor):', 
-                        'LAI (Density):', 
-                        'WBI (Water):', 
-                        'MCARI (Chlorophyll):', 
-                        'PSRI (Senescence):', 
-                        'PRI (Photosynthesis):'
+                        'Tree ID:', 'Peak Height (m):', 'Radius (m):', 'NDVI (Vigor):', 
+                        'LAI (Density):', 'WBI (Water):', 'MCARI (Chlorophyll):', 
+                        'PSRI (Senescence):', 'PRI (Photosynthesis):'
                     ],
                     localize=True
                 )
                 
+                # Then pass it to the GeoJson layer
                 folium.GeoJson(
                     target_gdf, 
-                    style_function=lambda x: {
-                        'fillColor': color, 
-                        'color': 'white', 
-                        'weight': 2.0, 
-                        'fillOpacity': 0.7
-                    }, 
+                    style_function=lambda x: {'fillColor': color, 'color': 'white', 'weight': 2.0, 'fillOpacity': 0.7}, 
                     tooltip=tooltip
                 ).add_to(m)
 
