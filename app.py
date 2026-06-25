@@ -12,8 +12,8 @@ import rasterio
 from rasterio.warp import transform_bounds
 import matplotlib.pyplot as plt
 import math
-from shapely.geometry import Point, MultiPoint
-from sklearn.cluster import AgglomerativeClustering, DBSCAN
+from shapely.geometry import Point
+from sklearn.cluster import AgglomerativeClustering
 from matplotlib.lines import Line2D
 import warnings
 warnings.filterwarnings('ignore')
@@ -49,72 +49,55 @@ def load_and_process_data():
         
     gdf = gpd.read_file(shp_file).drop_duplicates(subset=['tree_id'])
     
-    # Calculate Statistical Thresholds
+    # Standard 2D Statistical Thresholds
     ndvi_mean = gdf['NDVI_mn'].mean()
     lai_mean = gdf['LAI_mn'].mean()
     radius_mean = gdf['Radius_m'].mean()
+    psri_mean = gdf['PSRI_mn'].mean()
+    
     wbi_25 = gdf['WBI_mn'].quantile(0.25)
     ndvi_25 = gdf['NDVI_mn'].quantile(0.25)
     mcari_25 = gdf['MCARI_mn'].quantile(0.25)
     lai_25 = gdf['LAI_mn'].quantile(0.25)
+    psri_75 = gdf['PSRI_mn'].quantile(0.75)
     ndvi_mi_25 = gdf['NDVI_mi'].quantile(0.25)
     ndvi_sd_75 = gdf['NDVI_sd'].quantile(0.75)
     cri1_sd_75 = gdf['CRI1_sd'].quantile(0.75)
-    psri_mean = gdf['PSRI_mn'].mean()
-    psri_75 = gdf['PSRI_mn'].quantile(0.75)
     pri_25 = gdf['PRI_mn'].quantile(0.25)
     
-    # Process CHM Thresholds strictly for the new scenario
+    # 3D CHM Thresholds
     if 'CHM_max' in gdf.columns:
         chm_max_25 = gdf['CHM_max'].quantile(0.25)
     else:
         gdf['CHM_max'] = 1.0 
         chm_max_25 = 0.5
 
-    # Apply Logic Flags (CHM Isolated)
+    # Apply Logic Flags
+    # Flag A: WBI vs NDVI
     gdf['Flag_A'] = (gdf['WBI_mn'] < wbi_25) & (gdf['NDVI_mn'] > ndvi_25) 
+    # Flag B: NDVI vs MCARI
     gdf['Flag_B'] = (gdf['NDVI_mn'] > ndvi_mean) & (gdf['MCARI_mn'] < mcari_25) 
+    # Flag C: Radius vs LAI vs PSRI (Reverted to 2D Logic)
     gdf['Flag_C'] = (gdf['Radius_m'] > radius_mean) & (gdf['LAI_mn'] < lai_25) & (gdf['PSRI_mn'] > psri_75)
+    # Flag E: Variance Logic
     gdf['Flag_E'] = (gdf['NDVI_mn'] > ndvi_25) & (gdf['NDVI_sd'] > ndvi_sd_75) & (gdf['CRI1_sd'] > cri1_sd_75) & (gdf['NDVI_mi'] < ndvi_mi_25) 
+    # Flag F: PRI Drop
     gdf['Flag_F'] = (gdf['PRI_mn'] < pri_25) & (gdf['LAI_mn'] > lai_25) & (gdf['WBI_mn'] > wbi_25) & (gdf['PSRI_mn'] > psri_mean) 
-    
-    # New Dedicated CHM Scenario
-    # Targets trees in the bottom 25% of height, but taller than 0.5m to exclude ground weeds
-    gdf['Flag_CHM'] = (gdf['CHM_max'] < chm_max_25) & (gdf['CHM_max'] > 0.5)
+    # Flag H: NEW - CHM Stunted Growth Logic
+    gdf['Flag_H'] = (gdf['CHM_max'] < chm_max_25) & (gdf['NDVI_mn'] > ndvi_mean)
     
     return gdf.to_crs(epsg=4326)
 
 gdf = load_and_process_data()
 
-# --- 3. DBSCAN ZONATION & SPECTRAL PLOTTING ENGINES ---
-def generate_management_zones(target_gdf, eps_meters=15.0, min_samples=5):
-    if len(target_gdf) < min_samples:
-        return gpd.GeoDataFrame(columns=['geometry'], crs=target_gdf.crs)
-        
-    local_crs = target_gdf.estimate_utm_crs()
-    projected_gdf = target_gdf.to_crs(local_crs)
-    coords = np.array([[geom.centroid.x, geom.centroid.y] for geom in projected_gdf.geometry])
-    
-    clustering = DBSCAN(eps=eps_meters, min_samples=min_samples).fit(coords)
-    projected_gdf['cluster_id'] = clustering.labels_
-    clustered_gdf = projected_gdf[projected_gdf['cluster_id'] != -1]
-    
-    zone_polygons = []
-    for cluster_id, group in clustered_gdf.groupby('cluster_id'):
-        points = MultiPoint(group.geometry.centroid.tolist())
-        hull = points.convex_hull.buffer(3.0) 
-        zone_polygons.append(hull)
-        
-    zones_gdf = gpd.GeoDataFrame(geometry=zone_polygons, crs=local_crs)
-    return zones_gdf.to_crs(epsg=4326)
-
+# --- 3. SPECTRAL PLOTTING ENGINE ---
 def plot_spectral_signature(target_gdf, all_gdf):
     bands = ['Blue_mn', 'Green_mn', 'Red_mn', 'RedEdge_mn', 'NIR_mn']
     wavelengths = [450, 560, 650, 730, 840] 
     
     available_bands = [b for b in bands if b in all_gdf.columns]
     if len(available_bands) != len(bands):
-        st.warning("⚠️ **Spectral Bands Missing:** Ensure your shapefile contains the exact columns: `Blue_mn`, `Green_mn`, `Red_mn`, `RedEdge_mn`, `NIR_mn`.")
+        st.warning("⚠️ **Spectral Bands Missing:** To view spectral charts, ensure your shapefile contains the exact columns: `Blue_mn`, `Green_mn`, `Red_mn`, `RedEdge_mn`, `NIR_mn`.")
         return None
         
     baseline_spectra = all_gdf[bands].mean().values
@@ -137,31 +120,45 @@ st.sidebar.header("Diagnostic Controls")
 scenario_dict = {
     'Flag_A': (
         'A: Target Irrigation (Drought)', 'blue', 'Focuses on canopies with low water absorption but stable physical structure.',
-        '''**1. Inputs Used:** WBI (Water Band Index) and NDVI.\n**2. Indicator:** WBI detects water molecules; NDVI detects chlorophyll.\n**3. Conclusion:** High NDVI with bottom-tier WBI indicates the canopy is structurally intact but actively dehydrating. This maps acute drought stress requiring immediate variable-rate irrigation.'''
+        '''**1. Inputs Used:** WBI (Water Band Index) and NDVI.
+**2. What They Indicate:** WBI detects physical canopy water content. NDVI detects active chlorophyll.
+**3. Scientific Conclusion:** The threshold targets trees with WBI in the bottom 25%, but NDVI in the top 75%. Because the tree is highly green but severely lacking water, we conclude it is structurally intact but actively dehydrating, requiring immediate irrigation before xylem damage occurs.'''
     ),
     'Flag_B': (
-        'B: Target Fertilizer (Hidden Hunger)', 'purple', 'Identifies physically large canopies with low chlorophyll concentration.',
-        '''**1. Inputs Used:** NDVI and MCARI.\n**2. Indicator:** NDVI measures biomass; MCARI measures chlorophyll (Nitrogen) concentration.\n**3. Conclusion:** Above-average NDVI with bottom-tier MCARI reveals mature canopies lacking internal nutrient density. This generates variable-rate nitrogen polygons.'''
+        'B: Target Fertilizer (Hidden Hunger)', 'purple', 'Identifies physically large canopies with low chlorophyll/nitrogen concentration.',
+        '''**1. Inputs Used:** NDVI and MCARI.
+**2. What They Indicate:** NDVI indicates overall biomass/vigor. MCARI is highly sensitive to variations in leaf chlorophyll (correlating to Nitrogen).
+**3. Scientific Conclusion:** Targets trees with above-average NDVI but MCARI in the bottom 25%. This indicates the tree has mature physical volume but lacks internal nutrient density ("hidden hunger"), signaling a need for targeted Nitrogen application.'''
     ),
     'Flag_C': (
         'C: Inspect Root Rot (Decline)', 'red', 'Flags mature trees exhibiting systemic thinning and active leaf breakdown.',
-        '''**1. Inputs Used:** Radius_m, LAI (Leaf Area Index), and PSRI (Plant Senescence Reflectance Index).\n**2. Indicator:** Radius measures 2D spread; LAI measures leaf stacking; PSRI detects leaf death (senescence).\n**3. Conclusion:** A canopy wider than average but with severe leaf drop and high senescence indicates a mature tree undergoing rapid structural decline typical of root pathogens.'''
+        '''**1. Inputs Used:** Radius_m, LAI (Leaf Area Index), and PSRI (Plant Senescence Reflectance Index).
+**2. What They Indicate:** Radius indicates horizontal 2D maturity. LAI measures leaf density. PSRI spikes when cellular breakdown occurs and canopy carotenoids/brown pigments become dominant.
+**3. Scientific Conclusion:** Targets trees that are physically wide (mature), but have bottom 25% LAI and top 25% PSRI. This 2D signature confirms a mature tree that is rapidly defoliating and breaking down cellularly.'''
     ),
     'Flag_E': (
-        'E: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage.',
-        '''**1. Inputs Used:** NDVI and internal Standard Deviations (NDVI_sd, CRI1_sd).\n**2. Indicator:** Standard deviation measures pixel fluctuation inside a single canopy.\n**3. Conclusion:** High internal variance within an otherwise green tree indicates one side is healthy while the other degrades—the exact spatial signature of a localized pest or fungal strike.'''
+        'E: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage on specific branches.',
+        '''**1. Inputs Used:** NDVI, NDVI_sd (Standard Deviation), and CRI1_sd.
+**2. What They Indicate:** Standard deviation metrics measure how much a value fluctuates *inside* a single tree canopy polygon.
+**3. Scientific Conclusion:** Filters for trees with decent overall health but top 25% internal variance. High internal variance indicates one side of the tree is healthy while the other side is rapidly degrading—the exact spatial signature of a localized pest or pathogen attack on specific branches.'''
     ),
     'Flag_F': (
-        'F: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure remains stable.',
-        '''**1. Inputs Used:** PRI (Photochemical Reflectance Index), LAI, WBI.\n**2. Indicator:** PRI measures light-use efficiency in photosynthesis.\n**3. Conclusion:** A severe drop in PRI, while leaf density and water remain stable, indicates the tree's photosynthetic engine has shut down due to sudden temperature shock.'''
+        'F: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure and hydration remain stable.',
+        '''**1. Inputs Used:** PRI (Photochemical Reflectance Index), LAI, WBI, and PSRI.
+**2. What They Indicate:** PRI is a direct proxy for the xanthophyll cycle and photosynthetic light-use efficiency. 
+**3. Scientific Conclusion:** Targets trees with normal leaf density and water content, but heavily suppressed PRI. Photosynthetic efficiency has shut down due to sudden environmental temperature shock, even though the leaves are still physically green and attached.'''
     ),
-    'Flag_CHM': (
-        'CHM: Structural Stunting', 'magenta', 'Isolates trees exhibiting severe 3D height suppression or apical dieback.',
-        '''**1. Inputs Used:** CHM_max (Canopy Height Model Peak).\n**2. Indicator:** CHM_max measures the absolute tallest point of the 3D canopy geometry.\n**3. Conclusion:** By filtering for canopies in the bottom 25% of height (while remaining >0.5m to exclude ground weeds), we mathematically isolate structurally stunted trees or mature trees that have lost their apical dominance due to severe dieback.'''
+    'Flag_H': (
+        'H: Stunted Growth (Height Anomaly)', 'magenta', 'Isolates trees that are structurally stunted despite maintaining high internal vigor.',
+        '''**1. Inputs Used:** CHM_max (Peak Canopy Height) and NDVI.
+**2. What They Indicate:** CHM_max measures absolute 3D vertical height. NDVI measures overall vegetative greenness.
+**3. Scientific Conclusion:** Targets trees with above-average greenness but peak heights in the bottom 25% of the block. This indicates the canopy is highly vigorous but failing to gain vertical mass, suggesting severe root-zone confinement, hardpan soil limitations, or recent aggressive mechanical top-pruning.'''
     ),
     'GAP_ANALYSIS': (
-        '🍋 Geometric Gap & Yield Analysis', 'red', 'Calculates missing trees and yield loss percentage based on canopy architecture.',
-        '''**1. Inputs Used:** Canopy Centroids (X/Y) and dynamic UTM projection.\n**2. Indicator:** Agglomerative Clustering groups trees into linear rows, measuring sequential X-axis distance.\n**3. Conclusion:** Identifies voids exceeding standard planting parameters and interpolates exact coordinates for field replanting.'''
+        '🍋 Geometric Gap & Yield Analysis', 'red', 'Calculates missing trees and yield loss percentage based on spatial canopy architecture.',
+        '''**1. Inputs Used:** Geometric Centroids, X/Y Coordinates, and 2D Proximity.
+**2. What They Indicate:** Evaluates the physical distance between existing canopy centroids along computed planting rows.
+**3. Scientific Conclusion:** Utilizes Agglomerative Clustering to flatten row topology, extrapolating planting points where the distance between adjacent trees exceeds the 5.5m expected spacing. Yields a direct count of missing crop positions.'''
     )
 }
 
@@ -218,7 +215,7 @@ if selected_scenario == 'GAP_ANALYSIS':
 
     gaps_gdf = gpd.GeoDataFrame(geometry=gaps, crs=gap_calc_gdf.crs)
     
-    # Standard 2D Canopy Buffer Collision Guard (CHM Removed)
+    # 2D Collision Filter (Prevents overlapping points without relying on CHM)
     tree_buffers = gap_calc_gdf.geometry.buffer(2.0).unary_union 
     gaps_gdf = gaps_gdf[~gaps_gdf.intersects(tree_buffers)]
     
@@ -230,8 +227,6 @@ if selected_scenario == 'GAP_ANALYSIS':
 else:
     target_gdf = gdf[gdf[selected_scenario] == True]
     color = scenario_dict[selected_scenario][1]
-    zones_gdf = generate_management_zones(target_gdf) if selected_scenario in ['Flag_A', 'Flag_B'] else None
-
 
 # --- 6. MAIN VISUALIZATION LAYOUT ---
 col1, col2 = st.columns([3, 1])
@@ -278,9 +273,6 @@ with col1:
         else:
             if not target_gdf.empty:
                 folium.GeoJson(target_gdf, style_function=lambda x: {'fillColor': color, 'color': 'white', 'weight': 2.0, 'fillOpacity': 0.7}, tooltip=folium.GeoJsonTooltip(fields=['tree_id', 'NDVI_mn'], aliases=['Tree ID:', 'NDVI:'])).add_to(m)
-            
-            if zones_gdf is not None and not zones_gdf.empty:
-                folium.GeoJson(zones_gdf, style_function=lambda x: {'fillColor': color, 'color': color, 'weight': 3.0, 'fillOpacity': 0.2, 'dashArray': '5, 5'}, name="Management Zones").add_to(m)
 
     folium.LayerControl().add_to(m)
     components.html(m._repr_html_(), height=650)
@@ -305,9 +297,6 @@ with col2:
     else:
         target_count, total_trees = len(target_gdf), len(gdf)
         st.metric(label="Targeted Trees", value=target_count, delta=f"{(target_count / total_trees * 100) if total_trees > 0 else 0:.1f}% of block", delta_color="inverse")
-        
-        if zones_gdf is not None:
-            st.metric(label="Active Management Zones", value=len(zones_gdf))
             
         if target_count > 0:
             fig = plot_spectral_signature(target_gdf, gdf)
@@ -318,5 +307,3 @@ with col2:
         st.header("📥 Export Targets")
         if not target_gdf.empty:
             st.download_button(label=f"Download {target_count} Targets (GeoJSON)", data=target_gdf.to_json(), file_name=f"field_targets_{selected_scenario}.geojson", mime="application/geo+json")
-            if zones_gdf is not None and not zones_gdf.empty:
-                st.download_button(label=f"Download Zones Polygon (GeoJSON)", data=zones_gdf.to_json(), file_name=f"management_zones_{selected_scenario}.geojson", mime="application/geo+json")
