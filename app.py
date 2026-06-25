@@ -280,12 +280,12 @@ with col1:
                 for idx, row in gaps_folium_gdf.iterrows():
                     folium.CircleMarker(
                         location=[row.geometry.y, row.geometry.x],
-                        radius=4,
+                        radius=5,
                         color='#FF0033',
-                        weight=1.5,
+                        weight=2.0,
                         fill=True,
-                        fill_color='#FF0033',
-                        fill_opacity=0.9,
+                        fill_color='#FFFFFF',
+                        fill_opacity=1.0,
                         tooltip=f"Calculated Crop Gap (Row Center Location)"
                     ).add_to(m)
         else:
