@@ -84,7 +84,11 @@ def load_and_process_data():
     # Flag F: PRI Drop
     gdf['Flag_E'] = (gdf['PRI_mn'] < pri_25) & (gdf['LAI_mn'] > lai_25) & (gdf['WBI_mn'] > wbi_25) & (gdf['PSRI_mn'] > psri_mean) 
     # Flag H: NEW - CHM Stunted Growth Logic
-    gdf['Flag_F'] = (gdf['CHM_max'] < chm_max_25) & (gdf['NDVI_mn'] > ndvi_mean)
+    # CHM Profiling Logic: Keeps all valid trees (filtering out ground weeds < 0.5m)
+    if 'CHM_max' in gdf.columns:
+        gdf['CHM_PROFILE'] = gdf['CHM_max'] >= 0.5
+    else:
+        gdf['CHM_PROFILE'] = False # Failsafe if CHM extraction hasn't run yet
     
     return gdf.to_crs(epsg=4326)
 
@@ -132,27 +136,27 @@ scenario_dict = {
     ),
     'Flag_C': (
         'C: Inspect Root Rot (Decline)', 'red', 'Flags mature trees exhibiting systemic thinning and active leaf breakdown.',
-        '''**1. Inputs Used:** Radius_m, LAI (Leaf Area Index), and PSRI (Plant Senescence Reflectance Index).
+        '''**1. Inputs Used:** Canopy Radius, LAI (Leaf Area Index), and PSRI (Plant Senescence Reflectance Index).
 **2. What They Indicate:** Radius indicates horizontal 2D maturity. LAI measures leaf density. PSRI spikes when cellular breakdown occurs and canopy carotenoids/brown pigments become dominant.
 **3. Scientific Conclusion:** Targets trees that are physically wide (mature), but have bottom 25% LAI and top 25% PSRI. This 2D signature confirms a mature tree that is rapidly defoliating and breaking down cellularly.'''
     ),
     'Flag_D': (
-        'E: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage on specific branches.',
-        '''**1. Inputs Used:** NDVI, NDVI_sd (Standard Deviation), and CRI1_sd.
-**2. What They Indicate:** Standard deviation metrics measure how much a value fluctuates *inside* a single tree canopy polygon.
-**3. Scientific Conclusion:** Filters for trees with decent overall health but top 25% internal variance. High internal variance indicates one side of the tree is healthy while the other side is rapidly degrading—the exact spatial signature of a localized pest or pathogen attack on specific branches.'''
+        'D: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage on specific branches.',
+        '''**1. Inputs Used:** NDVI_mn (Mean), NDVI_sd (Standard Deviation), NDVI_mi (Minimum), and CRI1_sd (Carotenoid Variance).
+**2. What They Indicate:** Mean NDVI confirms baseline viability. Minimum NDVI isolates pockets of dead tissue. Standard deviation metrics quantify asymmetric intra-canopy stress—the contrast between healthy chlorophyll and chlorotic sectors within the same tree.
+**3. Scientific Conclusion:** Targets trees maintaining acceptable overall vigor, but exhibiting extreme internal spectral variance alongside a severe localized drop in health. This asymmetric degradation is the precise spectral signature of a localized foliar pathogen or acute pest infestation, distinguishing it from systemic issues like water or nutrient stress.'''
     ),
     'Flag_E': (
-        'F: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure and hydration remain stable.',
+        'E: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure and hydration remain stable.',
         '''**1. Inputs Used:** PRI (Photochemical Reflectance Index), LAI, WBI, and PSRI.
 **2. What They Indicate:** PRI is a direct proxy for the xanthophyll cycle and photosynthetic light-use efficiency. 
 **3. Scientific Conclusion:** Targets trees with normal leaf density and water content, but heavily suppressed PRI. Photosynthetic efficiency has shut down due to sudden environmental temperature shock, even though the leaves are still physically green and attached.'''
     ),
     'Flag_F': (
-        'H: Stunted Growth (Height Anomaly)', 'magenta', 'Isolates trees that are structurally stunted despite maintaining high internal vigor.',
-        '''**1. Inputs Used:** CHM_max (Peak Canopy Height) and NDVI.
-**2. What They Indicate:** CHM_max measures absolute 3D vertical height. NDVI measures overall vegetative greenness.
-**3. Scientific Conclusion:** Targets trees with above-average greenness but peak heights in the bottom 25% of the block. This indicates the canopy is highly vigorous but failing to gain vertical mass, suggesting severe root-zone confinement, hardpan soil limitations, or recent aggressive mechanical top-pruning.'''
+        'F: Canopy Height Profiling (CHM)', 'green', 'Maps the absolute vertical height of all established canopies.',
+        '''**1. Inputs Used:** CHM_max (Peak Canopy Height).
+**2. Purpose:** Isolates 3D structural data from 2D spectral greenness, stripping away flat ground weeds.
+**3. Scientific Conclusion:** Rather than flagging anomalies, this maps the baseline vertical mass of the block. By displaying every canopy taller than 0.5m, it allows for a direct visual assessment of orchard uniformity, pruning efficiency, and spatial growth gradients across different soil zones.'''
     ),
     'GAP_ANALYSIS': (
         '🍋 Geometric Gap & Yield Analysis', 'red', 'Calculates missing trees and yield loss percentage based on spatial canopy architecture.',
@@ -272,7 +276,10 @@ with col1:
                 ).add_to(m)
         else:
             if not target_gdf.empty:
-                folium.GeoJson(target_gdf, style_function=lambda x: {'fillColor': color, 'color': 'white', 'weight': 2.0, 'fillOpacity': 0.7}, tooltip=folium.GeoJsonTooltip(fields=['tree_id', 'NDVI_mn'], aliases=['Tree ID:', 'NDVI:'])).add_to(m)
+                folium.GeoJson(target_gdf, style_function=lambda x: {'fillColor': color, 'color': 'white', 'weight': 2.0, 'fillOpacity': 0.7}, tooltip=folium.GeoJsonTooltip(
+    fields=['tree_id', 'NDVI_mn', 'CHM_max'], 
+    aliases=['Tree ID:', 'NDVI:', 'Peak Height (m):']
+)).add_to(m)
 
     folium.LayerControl().add_to(m)
     components.html(m._repr_html_(), height=650)
