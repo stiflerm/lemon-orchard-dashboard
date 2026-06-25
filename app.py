@@ -6,13 +6,20 @@ import geopandas as gpd
 import folium
 import streamlit.components.v1 as components
 import json
-import os
 import base64
 import io
 import numpy as np
 import rasterio
 from rasterio.warp import transform_bounds
 import matplotlib.pyplot as plt
+
+# --- NEW IMPORTS FOR GAP ANALYSIS ---
+import math
+from shapely.geometry import Point
+from sklearn.cluster import AgglomerativeClustering
+from matplotlib.lines import Line2D
+import warnings
+warnings.filterwarnings('ignore')
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Orchard Diagnostic Intelligence", layout="wide")
@@ -89,6 +96,7 @@ gdf = load_and_process_data()
 # --- 3. SIDEBAR CONTROLS ---
 st.sidebar.header("Diagnostic Controls")
 
+# [!] ADDED GAP ANALYSIS TO DICTIONARY
 scenario_dict = {
     'Flag_A': ('A: Target Irrigation (Drought)', 'blue', 'Focuses on canopies with low water absorption but stable physical structure.'),
     'Flag_B': ('B: Target Fertilizer (Hidden Hunger)', 'purple', 'Identifies physically large canopies with low chlorophyll/nitrogen concentration.'),
@@ -99,7 +107,8 @@ scenario_dict = {
     'Flag_G': ('G: Harvest Signal (Fruit/Flowers)', 'gold', 'Highlights canopies showing heavy fruit load or blooming via carotenoid spikes.'),
     'Flag_H': ('H: Soil Salinity / Osmotic Stress', 'brown', 'Identifies secondary chlorosis and dehydration caused by salt accumulation.'),
     'Flag_I': ('I: Pruning Verified', 'green', 'Confirms healthy, vigorous canopies that have recently reduced in physical volume.'),
-    'Flag_J': ('J: Trunk Weeds (Young Trees)', 'magenta', 'Flags young saplings with artificially high health scores due to surrounding weed competition.')
+    'Flag_J': ('J: Trunk Weeds (Young Trees)', 'magenta', 'Flags young saplings with artificially high health scores due to surrounding weed competition.'),
+    'GAP_ANALYSIS': ('🍋 Geometric Gap & Yield Analysis', 'red', 'Calculates missing trees and yield loss percentage based on spatial canopy architecture.')
 }
 
 selected_scenario = st.sidebar.selectbox(
@@ -113,130 +122,232 @@ st.sidebar.header("Temporal Analysis")
 st.sidebar.info("Currently viewing static baseline flight.")
 st.sidebar.slider("Select Flight Date", min_value=1, max_value=2, value=1, disabled=True)
 
-# --- 4. MAIN LAYOUT ---
-col1, col2 = st.columns([3, 1])
 
-with col1:
-    toggle_col1, toggle_col2 = st.columns(2)
-    with toggle_col1:
-        show_lai = st.checkbox("Load LAI UAV Overlay", value=True)
-    with toggle_col2:
-        show_canopies = st.checkbox("Show Targeted Canopies", value=True)
-    
-    center_y = gdf.geometry.centroid.y.mean()
-    center_x = gdf.geometry.centroid.x.mean()
-    
-    m = folium.Map(location=[center_y, center_x], zoom_start=18, max_zoom=22, tiles='CartoDB dark_matter')
-    
+# --- 4. MAIN LAYOUT (SPLIT LOGIC) ---
+
+if selected_scenario != 'GAP_ANALYSIS':
     # ==========================================
-    # TIFF PROCESSING PIPELINE (Multi-band)
+    # LOGIC A: STANDARD FOLIUM MAP (Flags A-J)
     # ==========================================
-    if show_lai:
-        # Construct absolute path for the new file
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        tiff_path = os.path.join(current_dir, "data", "LAI_1.tif")
+    col1, col2 = st.columns([3, 1])
+
+    with col1:
+        toggle_col1, toggle_col2 = st.columns(2)
+        with toggle_col1:
+            show_lai = st.checkbox("Load LAI UAV Overlay", value=True)
+        with toggle_col2:
+            show_canopies = st.checkbox("Show Targeted Canopies", value=True)
         
-        if os.path.exists(tiff_path):
-            with rasterio.open(tiff_path) as src:
-                minx, miny, maxx, maxy = transform_bounds(src.crs, 'EPSG:4326', *src.bounds)
-                image_bounds = [[miny, minx], [maxy, maxx]]
-                
-                scale = min(1.0, 1500.0 / src.width)
-                out_shape = (int(src.height * scale), int(src.width * scale))
-                
-                lai_data = src.read(1, out_shape=out_shape, resampling=rasterio.enums.Resampling.nearest)
-                lai_data = np.nan_to_num(lai_data, nan=-9999.0)
-                
-                nodata = src.nodata if src.nodata is not None else -9999.0
-                masked_data = np.ma.masked_where((lai_data == nodata) | (lai_data <= 0.1), lai_data)
-                
-                valid_pixels = masked_data.compressed()
-                if len(valid_pixels) > 0:
-                    vmin_val, vmax_val = np.percentile(valid_pixels, [5, 95])
-                else:
-                    vmin_val, vmax_val = 0.0, 3.0
+        center_y = gdf.geometry.centroid.y.mean()
+        center_x = gdf.geometry.centroid.x.mean()
+        
+        m = folium.Map(location=[center_y, center_x], zoom_start=18, max_zoom=22, tiles='CartoDB dark_matter')
+        
+        if show_lai:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            tiff_path = os.path.join(current_dir, "data", "LAI_1.tif")
+            
+            if os.path.exists(tiff_path):
+                with rasterio.open(tiff_path) as src:
+                    minx, miny, maxx, maxy = transform_bounds(src.crs, 'EPSG:4326', *src.bounds)
+                    image_bounds = [[miny, minx], [maxy, maxx]]
                     
-                cmap = plt.cm.RdYlGn
-                norm = plt.Normalize(vmin=vmin_val, vmax=vmax_val)
-                colored_image = cmap(norm(masked_data))
-                colored_image = (colored_image * 255).astype(np.uint8)
-                
-                colored_image[..., 3] = np.where(masked_data.mask, 0, 255) 
-                
-                img_buffer = io.BytesIO()
-                plt.imsave(img_buffer, colored_image, format='png')
-                img_buffer.seek(0)
-                encoded_string = base64.b64encode(img_buffer.read()).decode()
-                image_url = f"data:image/png;base64,{encoded_string}"
-                
-                folium.raster_layers.ImageOverlay(
-                    image=image_url,
-                    bounds=image_bounds,
-                    opacity=0.9,
-                    name='Raw TIFF UAV Overlay (Band 4)'
-                ).add_to(m)
+                    scale = min(1.0, 1500.0 / src.width)
+                    out_shape = (int(src.height * scale), int(src.width * scale))
+                    
+                    lai_data = src.read(1, out_shape=out_shape, resampling=rasterio.enums.Resampling.nearest)
+                    lai_data = np.nan_to_num(lai_data, nan=-9999.0)
+                    
+                    nodata = src.nodata if src.nodata is not None else -9999.0
+                    masked_data = np.ma.masked_where((lai_data == nodata) | (lai_data <= 0.1), lai_data)
+                    
+                    valid_pixels = masked_data.compressed()
+                    if len(valid_pixels) > 0:
+                        vmin_val, vmax_val = np.percentile(valid_pixels, [5, 95])
+                    else:
+                        vmin_val, vmax_val = 0.0, 3.0
+                        
+                    cmap = plt.cm.RdYlGn
+                    norm = plt.Normalize(vmin=vmin_val, vmax=vmax_val)
+                    colored_image = cmap(norm(masked_data))
+                    colored_image = (colored_image * 255).astype(np.uint8)
+                    colored_image[..., 3] = np.where(masked_data.mask, 0, 255) 
+                    
+                    img_buffer = io.BytesIO()
+                    plt.imsave(img_buffer, colored_image, format='png')
+                    img_buffer.seek(0)
+                    encoded_string = base64.b64encode(img_buffer.read()).decode()
+                    image_url = f"data:image/png;base64,{encoded_string}"
+                    
+                    folium.raster_layers.ImageOverlay(
+                        image=image_url,
+                        bounds=image_bounds,
+                        opacity=0.9,
+                        name='Raw TIFF UAV Overlay (Band 4)'
+                    ).add_to(m)
+            else:
+                st.error(f"TIFF file not found at: {tiff_path}")
+
+        target_gdf = gdf[gdf[selected_scenario] == True]
+        color = scenario_dict[selected_scenario][1]
+
+        if show_canopies and not target_gdf.empty:
+            target_json = target_gdf.copy()
+            tooltip = folium.GeoJsonTooltip(
+                fields=['tree_id', 'NDVI_mn', 'WBI_mn', 'LAI_mn', 'MCARI_mn'],
+                aliases=['Tree ID:', 'NDVI:', 'WBI:', 'LAI:', 'MCARI:'],
+                localize=True
+            )
+            folium.GeoJson(
+                target_json,
+                style_function=lambda x: {
+                    'fillColor': color,
+                    'color': 'white', 
+                    'weight': 2.0,
+                    'fillOpacity': 0.7
+                },
+                name="Targeted Trees",
+                tooltip=tooltip
+            ).add_to(m)
+
+        folium.LayerControl().add_to(m)
+        components.html(m._repr_html_(), height=650)
+
+    with col2:
+        st.header("Scenario Details")
+        st.subheader(scenario_dict[selected_scenario][0])
+        st.write(scenario_dict[selected_scenario][2])
+        
+        total_trees = len(gdf)
+        target_count = len(target_gdf)
+        pct_block = (target_count / total_trees) * 100 if total_trees > 0 else 0
+        
+        st.metric(label="Targeted Trees", value=target_count, delta=f"{pct_block:.1f}% of block", delta_color="inverse")
+        
+        st.markdown("---")
+        st.header("📥 Export Targets")
+        if not target_gdf.empty:
+            geojson_data = target_gdf.to_json()
+            st.download_button(
+                label=f"Download {target_count} Targets (GeoJSON)",
+                data=geojson_data,
+                file_name=f"field_targets_{selected_scenario}.geojson",
+                mime="application/geo+json",
+                help="Download these specific tree polygons for use in QGIS, Google Earth, or mobile field apps."
+            )
         else:
-            st.error(f"TIFF file not found at: {tiff_path}")
-
-    # Filter targets
-    target_gdf = gdf[gdf[selected_scenario] == True]
-    color = scenario_dict[selected_scenario][1]
-
-    # Render Polygons
-    if show_canopies and not target_gdf.empty:
-        target_json = target_gdf.copy()
+            st.info("No targets found in this scenario to export.")
         
-        tooltip = folium.GeoJsonTooltip(
-            fields=['tree_id', 'NDVI_mn', 'WBI_mn', 'LAI_mn', 'MCARI_mn'],
-            aliases=['Tree ID:', 'NDVI:', 'WBI:', 'LAI:', 'MCARI:'],
-            localize=True
+        st.markdown("---")
+        st.header("🤖 Agentic Insights")
+        st.warning("LLM Backend Disconnected")
+        st.write(f"*Mock Insight generated for {scenario_dict[selected_scenario][0]}...*")
+        st.info(f"Analysis indicates {target_count} targets. Spatial clustering detected in the primary zones. Recommend immediate field verification within 48 hours to validate findings.")
+
+else:
+    # ==========================================
+    # LOGIC B: GEOMETRIC GAP ANALYSIS
+    # ==========================================
+    st.header("Geometric Gap & Yield Analysis")
+    st.write("Processing canopy architecture and interpolating missing yield gaps...")
+
+    # Parameters
+    expected_tree_spacing = 5.5      
+    row_distance_threshold = 2.5     
+    grid_angle_degrees = 75.0        
+    max_empty_space_m = 20.0         
+
+    # Create a fresh working copy of the dataframe and convert to UTM
+    gap_gdf = gdf.copy()
+    gap_gdf = gap_gdf.to_crs(gap_gdf.estimate_utm_crs())
+
+    # Extract centroids
+    gap_gdf['centroid'] = gap_gdf.geometry.centroid
+    raw_x = gap_gdf['centroid'].apply(lambda p: p.x)
+    raw_y = gap_gdf['centroid'].apply(lambda p: p.y)
+    mean_x, mean_y = raw_x.mean(), raw_y.mean()
+
+    # Rotation Functions
+    def rotate_coords(x, y, angle_deg):
+        x_centered, y_centered = x - mean_x, y - mean_y
+        angle_rad = math.radians(angle_deg)
+        rx = x_centered * math.cos(angle_rad) + y_centered * math.sin(angle_rad)
+        ry = -x_centered * math.sin(angle_rad) + y_centered * math.cos(angle_rad)
+        return rx, ry
+
+    def unrotate_coords(rx, ry, angle_deg):
+        angle_rad = math.radians(angle_deg)
+        x = rx * math.cos(angle_rad) - ry * math.sin(angle_rad)
+        y = rx * math.sin(angle_rad) + ry * math.cos(angle_rad)
+        return x + mean_x, y + mean_y
+
+    rotated_coords = [rotate_coords(x, y, grid_angle_degrees) for x, y in zip(raw_x, raw_y)]
+    gap_gdf['x'] = [c[0] for c in rotated_coords]  
+    gap_gdf['y'] = [c[1] for c in rotated_coords]  
+
+    # Clustering
+    clustering = AgglomerativeClustering(
+        n_clusters=None, distance_threshold=row_distance_threshold, linkage='average' 
+    )
+    y_matrix = np.array(gap_gdf['y'].tolist()).reshape(-1, 1)
+    gap_gdf['Row_ID'] = clustering.fit_predict(y_matrix)
+    
+    row_centers = gap_gdf.groupby('Row_ID')['y'].mean().to_dict()
+    gap_gdf['Row_Center_Y'] = gap_gdf['Row_ID'].map(row_centers)
+
+    # Gap Calculation
+    gaps = []
+    for row_id, group in gap_gdf.groupby('Row_ID'):
+        group = group.sort_values(by='x').reset_index(drop=True)
+        for i in range(len(group) - 1):
+            tree_A, tree_B = group.iloc[i], group.iloc[i + 1]
+            dist = tree_B['x'] - tree_A['x']
+            
+            if (expected_tree_spacing * 1.5) < dist <= max_empty_space_m:
+                missing_count = int(np.round(dist / expected_tree_spacing)) - 1
+                for j in range(1, missing_count + 1):
+                    gap_x_rotated = tree_A['x'] + (j * (dist / (missing_count + 1)))
+                    gap_y_rotated = tree_A['Row_Center_Y']
+                    real_x, real_y = unrotate_coords(gap_x_rotated, gap_y_rotated, grid_angle_degrees)
+                    gaps.append(Point(real_x, real_y))
+
+    gaps_results_gdf = gpd.GeoDataFrame(geometry=gaps, crs=gap_gdf.crs)
+
+    # Metrics Output
+    total_trees = len(gap_gdf)
+    total_gaps = len(gaps_results_gdf)
+    ideal_capacity = total_trees + total_gaps
+    yield_loss_percentage = (total_gaps / ideal_capacity) * 100 if ideal_capacity > 0 else 0.0
+
+    st.subheader("Architecture & Yield Loss Report")
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric(label="Total Orchard Trees", value=total_trees)
+    col2.metric(label="Calculated Crop Gaps", value=total_gaps)
+    col3.metric(label="Total Yield Loss", value=f"{yield_loss_percentage:.2f}%")
+
+    st.divider()
+
+    # Visual Output
+    st.subheader("Spatial Gap Map")
+    fig, ax = plt.subplots(figsize=(14, 12))
+
+    gap_gdf.set_geometry('geometry').plot(
+        ax=ax, facecolor='lightgreen', edgecolor='green', linewidth=1.0
+    )
+
+    if not gaps_results_gdf.empty:
+        gaps_results_gdf.plot(
+            ax=ax, color='red', marker='o', markersize=50, edgecolor='black', linewidth=1.0
         )
-        
-        folium.GeoJson(
-            target_json,
-            style_function=lambda x: {
-                'fillColor': color,
-                'color': 'white', 
-                'weight': 2.0,
-                'fillOpacity': 0.7
-            },
-            name="Targeted Trees",
-            tooltip=tooltip
-        ).add_to(m)
 
-    folium.LayerControl().add_to(m)
-    components.html(m._repr_html_(), height=650)
+    custom_lines = [
+        Line2D([0], [0], color='lightgreen', markeredgecolor='green', marker='s', markersize=10, markeredgewidth=1),
+        Line2D([0], [0], color='w', markerfacecolor='red', marker='o', markersize=10, markeredgecolor='black')
+    ]
+    ax.legend(custom_lines, ['Tree Canopy', 'Calculated Missing Gap'], loc='upper right')
 
-with col2:
-    st.header("Scenario Details")
-    st.subheader(scenario_dict[selected_scenario][0])
-    st.write(scenario_dict[selected_scenario][2])
+    plt.axis('equal') 
+    plt.grid(True, linestyle='--', alpha=0.3)
     
-    total_trees = len(gdf)
-    target_count = len(target_gdf)
-    pct_block = (target_count / total_trees) * 100 if total_trees > 0 else 0
-    
-    st.metric(label="Targeted Trees", value=target_count, delta=f"{pct_block:.1f}% of block", delta_color="inverse")
-    
-    # --- NEW EXPORT TOOL ---
-    st.markdown("---")
-    st.header("📥 Export Targets")
-    if not target_gdf.empty:
-        # Convert the filtered GeoDataFrame to a GeoJSON string
-        geojson_data = target_gdf.to_json()
-        
-        st.download_button(
-            label=f"Download {target_count} Targets (GeoJSON)",
-            data=geojson_data,
-            file_name=f"field_targets_{selected_scenario}.geojson",
-            mime="application/geo+json",
-            help="Download these specific tree polygons for use in QGIS, Google Earth, or mobile field apps."
-        )
-    else:
-        st.info("No targets found in this scenario to export.")
-    
-    st.markdown("---")
-    st.header("🤖 Agentic Insights")
-    st.warning("LLM Backend Disconnected")
-    st.write(f"*Mock Insight generated for {scenario_dict[selected_scenario][0]}...*")
-    st.info(f"Analysis indicates {target_count} targets. Spatial clustering detected in the primary zones. Recommend immediate field verification within 48 hours to validate findings.")
+    st.pyplot(fig)
