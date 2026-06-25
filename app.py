@@ -269,7 +269,7 @@ with col1:
         else:
             if not target_gdf.empty:
                 # Dynamic Hover Tooltip: Automatically populates available metrics
-                available_fields = [f for f in ['tree_id', 'CHM_max', 'Radius_m', 'NDVI_mn', 'LAI_mn', 'WBI_mn', 'MCARI_mn', 'PSRI_mn', 'PRI_mn'] if f in gdf.columns]
+                available_fields = [f for f in ['tree_id', 'CHM_max', 'NDVI_mn', 'LAI_mn', 'WBI_mn', 'MCARI_mn', 'PSRI_mn', 'PRI_mn'] if f in gdf.columns]
                 available_aliases = [f"{f}:" for f in available_fields]
                 
                 tooltip = folium.GeoJsonTooltip(
