@@ -124,13 +124,6 @@ scenario_dict = {
 }
 
 selected_scenario = st.sidebar.selectbox("Select Target Scenario", options=list(scenario_dict.keys()), format_func=lambda x: scenario_dict[x][0])
-
-st.sidebar.markdown("---")
-# DEBUG MODE: This will help you fix the tooltip issue immediately
-debug_mode = st.sidebar.checkbox("🛠️ Developer Debug Mode (Show Columns)")
-if debug_mode:
-    st.sidebar.warning("Current Shapefile Columns:")
-    st.sidebar.write(gdf.columns.tolist())
 st.sidebar.markdown("---")
 
 # LLM INTEGRATION UI
