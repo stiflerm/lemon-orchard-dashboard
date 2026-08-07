@@ -272,7 +272,7 @@ with col2:
 with st.sidebar.expander("🤖 LLM Diagnostic Assistant", expanded=False):
     st.markdown("Query the dataset or generate an automated prescription.")
     
-    api_key = st.text_input("Enter Gemini API Key", type="password")
+    api_key = st.text_input("A", type="password")
     
     if "messages" not in st.session_state:
         st.session_state.messages = []
