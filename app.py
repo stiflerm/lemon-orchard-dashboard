@@ -3,6 +3,7 @@ import tempfile
 import os
 import streamlit as st
 import geopandas as gpd
+import google.generativeai as genai
 import folium
 import streamlit.components.v1 as components
 import base64
@@ -110,7 +111,7 @@ def plot_spectral_signature(target_gdf, all_gdf):
     plt.tight_layout()
     return fig
 
-# --- 4. SIDEBAR CONTROLS & LLM ---
+# --- 4. SIDEBAR CONTROLS ---
 st.sidebar.header("Diagnostic Controls")
 
 scenario_dict = {
@@ -125,13 +126,6 @@ scenario_dict = {
 
 selected_scenario = st.sidebar.selectbox("Select Target Scenario", options=list(scenario_dict.keys()), format_func=lambda x: scenario_dict[x][0])
 st.sidebar.markdown("---")
-
-# LLM INTEGRATION UI
-with st.sidebar.expander("🤖 LLM Diagnostic Assistant", expanded=False):
-    st.markdown("Query the active dataset or ask agronomic questions.")
-    user_query = st.text_input("Ask the assistant...")
-    if user_query:
-        st.info("LLM Backend executing... (Connect your LangChain/OpenAI/Gemini agent here)")
 
 # --- 5. PRE-PROCESSING ---
 if selected_scenario == 'GAP_ANALYSIS':
@@ -154,7 +148,7 @@ if selected_scenario == 'GAP_ANALYSIS':
         y = rx * math.sin(math.radians(angle_deg)) + ry * math.cos(math.radians(angle_deg))
         return x + mean_x, y + mean_y
 
-    expected_tree_spacing, row_distance_threshold, grid_angle_degrees, max_empty_space_m = 5.5, 2.5, 75.0, 20.0         
+    expected_tree_spacing, row_distance_threshold, grid_angle_degrees, max_empty_space_m = 5.5, 2.5, 75.0, 20.0        
     rotated_coords = [rotate_coords(x, y, grid_angle_degrees) for x, y in zip(raw_x, raw_y)]
     gap_calc_gdf['x'], gap_calc_gdf['y'] = [c[0] for c in rotated_coords], [c[1] for c in rotated_coords]
 
@@ -273,3 +267,92 @@ with col2:
         st.header("📥 Export Targets")
         if not target_gdf.empty:
             st.download_button(label=f"Download {target_count} Targets (GeoJSON)", data=target_gdf.to_json(), file_name=f"field_targets_{selected_scenario}.geojson", mime="application/geo+json")
+
+# --- 7. LLM DIAGNOSTIC ASSISTANT ---
+with st.sidebar.expander("🤖 LLM Diagnostic Assistant", expanded=False):
+    st.markdown("Query the dataset or generate an automated prescription.")
+    
+    api_key = st.text_input("Enter Gemini API Key", type="password")
+    
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+        
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            
+    # Context Builder (Shared by both the button and the chat)
+    active_scenario_name = scenario_dict[selected_scenario][0]
+    active_rationale = scenario_dict[selected_scenario][3]
+    
+    if selected_scenario == 'GAP_ANALYSIS':
+        spatial_context = f"Total Trees: {total_trees}. Calculated Crop Gaps: {total_gaps}. Estimated Yield Loss: {yield_loss_percentage:.2f}%."
+    else:
+        spatial_context = f"Total Trees: {total_trees}. Flagged Targets: {target_count} ({(target_count / total_trees * 100) if total_trees > 0 else 0:.1f}% of block)."
+
+    system_prompt = f"""
+    You are an expert precision agriculture Decision Support System (DSS). 
+    You are assisting a user analyzing an arid citrus orchard in western Rajasthan using UAV hyperspectral and 3D point cloud data.
+    
+    CURRENT ACTIVE MAP LAYER: {active_scenario_name}
+    SCIENTIFIC RATIONALE: {active_rationale}
+    CURRENT SPATIAL STATISTICS: {spatial_context}
+    
+    Keep responses concise, scientific, and strictly focused on agronomy and remote sensing.
+    """
+
+    # 1. PROACTIVE TRIGGER: Automated Prescription Button
+    if st.button("Generate Automated Field Prescription"):
+        if not api_key:
+            st.warning("⚠️ Please enter a valid API Key.")
+        else:
+            try:
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel('gemini-1.5-pro', system_instruction=system_prompt)
+                
+                auto_prompt = "Based on the current map layer and spatial statistics, provide a brief, bulleted agronomic action plan. Specify exactly how to address the flagged trees or yield gaps in this specific arid environment."
+                
+                with st.chat_message("assistant"):
+                    response_placeholder = st.empty()
+                    full_response = ""
+                    # Stream the auto-generated response
+                    for chunk in model.generate_content(auto_prompt, stream=True):
+                        full_response += chunk.text
+                        response_placeholder.markdown(full_response + "▌")
+                    response_placeholder.markdown(full_response)
+                
+                # Save to history
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+                
+            except Exception as e:
+                st.error(f"API Error: {str(e)}")
+
+    # 2. REACTIVE TRIGGER: Standard Chat Input
+    if user_query := st.chat_input("Ask a follow-up question..."):
+        if not api_key:
+            st.warning("⚠️ Please enter a valid API Key.")
+        else:
+            st.session_state.messages.append({"role": "user", "content": user_query})
+            with st.chat_message("user"):
+                st.markdown(user_query)
+                
+            try:
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel('gemini-1.5-pro', system_instruction=system_prompt)
+                
+                history = [{'role': 'user' if m['role'] == 'user' else 'model', 'parts': [m['content']]} for m in st.session_state.messages[:-1]]
+                chat = model.start_chat(history=history)
+                
+                with st.chat_message("assistant"):
+                    response_placeholder = st.empty()
+                    full_response = ""
+                    response = chat.send_message(user_query, stream=True)
+                    for chunk in response:
+                        full_response += chunk.text
+                        response_placeholder.markdown(full_response + "▌")
+                    response_placeholder.markdown(full_response)
+                    
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+                
+            except Exception as e:
+                st.error(f"API Error: {str(e)}")
