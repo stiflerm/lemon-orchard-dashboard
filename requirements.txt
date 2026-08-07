@@ -6,3 +6,4 @@ rasterio
 matplotlib
 scikit-learn
 shapely
+google-generativeai
