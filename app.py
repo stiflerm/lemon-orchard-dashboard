@@ -308,7 +308,7 @@ with st.sidebar.expander("🤖 LLM Diagnostic Assistant", expanded=False):
         else:
             try:
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=system_prompt)
+                model = genai.GenerativeModel('gemini-3.6-flash', system_instruction=system_prompt)
                 
                 auto_prompt = "Based on the current map layer and spatial statistics, provide a brief, bulleted agronomic action plan. Specify exactly how to address the flagged trees or yield gaps in this specific arid environment."
                 
