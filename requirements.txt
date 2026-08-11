@@ -4,6 +4,7 @@ numpy
 geopandas
 google-generativeai
 folium
+streamlit-folium
 rasterio
 matplotlib
 shapely
