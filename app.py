@@ -268,7 +268,7 @@ with col2:
         if not spectral_df.empty and selected_scenario != 'CHM_PROFILE':
             
             # Check if user cl# HYPERSPECTRAL PLOT INTEGRATION
-        if not spectral_df.empty and selected_scenario != 'CHM_PROFILE':
+         if not spectral_df.empty and selected_scenario != 'CHM_PROFILE':
             
             # Check if user clicked a canopy on the map
             selected_canopy_id = None
