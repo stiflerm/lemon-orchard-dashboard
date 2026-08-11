@@ -2,6 +2,7 @@ import zipfile
 import tempfile
 import os
 import streamlit as st
+import pandas as pd  # <--- ADD THIS LINE
 import geopandas as gpd
 import google.generativeai as genai
 import folium
