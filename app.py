@@ -267,6 +267,9 @@ with col2:
         # HYPERSPECTRAL PLOT INTEGRATION
         if not spectral_df.empty and selected_scenario != 'CHM_PROFILE':
             
+            # Check if user cl# HYPERSPECTRAL PLOT INTEGRATION
+        if not spectral_df.empty and selected_scenario != 'CHM_PROFILE':
+            
             # Check if user clicked a canopy on the map
             selected_canopy_id = None
             if st_data and st_data.get("last_active_drawing"):
@@ -274,19 +277,35 @@ with col2:
                 if "generated_id" in props:
                     selected_canopy_id = props["generated_id"]
             
+            # Helper function to add electromagnetic regions to any plot
+            def add_em_regions(figure):
+                max_band = max(x_axis_labels) if x_axis_labels else 344
+                figure.add_vrect(x0=1, x1=160, fillcolor="#3498db", opacity=0.1, layer="below", line_width=0, annotation_text="Visible (VIS)", annotation_position="top left", annotation_font_size=10, annotation_font_color="#3498db")
+                figure.add_vrect(x0=160, x1=200, fillcolor="#e74c3c", opacity=0.1, layer="below", line_width=0, annotation_text="Red Edge", annotation_position="top left", annotation_font_size=10, annotation_font_color="#e74c3c")
+                figure.add_vrect(x0=200, x1=max_band, fillcolor="#95a5a6", opacity=0.1, layer="below", line_width=0, annotation_text="Near-Infrared (NIR)", annotation_position="top left", annotation_font_size=10, annotation_font_color="#95a5a6")
+                return figure
+
             if selected_canopy_id:
-                # USER CLICKED A TREE: Plot Single Signature
+                # USER CLICKED A TREE: Plot Single Signature vs Baseline
                 st.subheader(f"Canopy {selected_canopy_id} Reflectance")
                 try:
                     canopy_data = spectral_df[spectral_df['generated_id'] == selected_canopy_id][band_cols].iloc[0].values
-                    fig = px.line(
-                        x=x_axis_labels, 
-                        y=canopy_data,
-                        labels={'x': 'Band Number', 'y': 'Reflectance'},
-                        title=f"Live Signature: Tree {selected_canopy_id}"
+                    baseline_spectra = spectral_df[band_cols].mean().values
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=x_axis_labels, y=baseline_spectra, mode='lines', name='Healthy Baseline', line=dict(color='lightgreen', dash='dash', width=2)))
+                    fig.add_trace(go.Scatter(x=x_axis_labels, y=canopy_data, mode='lines', name=f'Tree {selected_canopy_id}', line=dict(color='#00FFCC', width=2)))
+                    
+                    fig = add_em_regions(fig)
+                    
+                    fig.update_layout(
+                        title=f"Live Signature: Tree {selected_canopy_id} vs Baseline",
+                        xaxis_title="Band Number (with EM Regions)",
+                        yaxis_title="Reflectance",
+                        height=400,
+                        margin=dict(l=0, r=0, t=30, b=0),
+                        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
                     )
-                    fig.update_traces(line_color='#00FFCC')
-                    fig.update_layout(height=350, margin=dict(l=0, r=0, t=30, b=0))
                     st.plotly_chart(fig, use_container_width=True)
                 except IndexError:
                     st.warning(f"No spectral data available for Tree {selected_canopy_id}")
@@ -304,11 +323,13 @@ with col2:
                 fig.add_trace(go.Scatter(x=x_axis_labels, y=baseline_spectra, mode='lines', name='Healthy Baseline', line=dict(color='lightgreen', dash='dash', width=2)))
                 fig.add_trace(go.Scatter(x=x_axis_labels, y=target_spectra, mode='lines', name='Flagged Targets', line=dict(color='red', width=2)))
                 
+                fig = add_em_regions(fig)
+                
                 fig.update_layout(
                     title="Average Target Variance",
-                    xaxis_title="Band Number",
+                    xaxis_title="Band Number (with EM Regions)",
                     yaxis_title="Reflectance",
-                    height=350,
+                    height=400,
                     margin=dict(l=0, r=0, t=30, b=0),
                     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
                 )
