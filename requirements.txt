@@ -1,9 +1,11 @@
-streamlit==1.32.0
-geopandas
-folium
+streamlit
+pandas
 numpy
+geopandas
+google-generativeai
+folium
 rasterio
 matplotlib
-scikit-learn
 shapely
-google-generativeai
+scikit-learn
+plotly
