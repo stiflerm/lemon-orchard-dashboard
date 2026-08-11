@@ -62,7 +62,9 @@ def load_and_process_data():
     radius_mean = gdf['Radius_m'].mean() if 'Radius_m' in gdf.columns else 1.0
     
     wbi_25 = gdf['WBI_mn'].quantile(0.25)
+    wbi_75 = gdf['WBI_mn'].quantile(0.75)
     ndvi_25 = gdf['NDVI_mn'].quantile(0.25)
+    ndvi_75 = gdf['NDVI_mn'].quantile(0.75)
     mcari_25 = gdf['MCARI_mn'].quantile(0.25)
     lai_25 = gdf['LAI_mn'].quantile(0.25)
     psri_75 = gdf['PSRI_mn'].quantile(0.75)
@@ -71,8 +73,13 @@ def load_and_process_data():
     cri1_sd_75 = gdf['CRI1_sd'].quantile(0.75)
     pri_25 = gdf['PRI_mn'].quantile(0.25)
     
-    # Apply Logic Flags
-    gdf['Flag_A'] = (gdf['WBI_mn'] < wbi_25) & (gdf['NDVI_mn'] > ndvi_25) 
+    # 1. Define the Elite Reference Group (Top 25% Vigor + Top 25% Water)
+    gdf['IS_HEALTHY_REF'] = (gdf['NDVI_mn'] >= ndvi_75) & (gdf['WBI_mn'] >= wbi_75)
+    
+    # 2. Apply Robust Logic Flags
+    # Flag A: Must be structurally larger than average, but severely dehydrated
+    gdf['Flag_A'] = (gdf['WBI_mn'] < wbi_25) & (gdf['NDVI_mn'] > ndvi_mean) & (gdf['LAI_mn'] > lai_mean)
+    
     gdf['Flag_B'] = (gdf['NDVI_mn'] > ndvi_mean) & (gdf['MCARI_mn'] < mcari_25) 
     
     if 'Radius_m' in gdf.columns:
@@ -116,7 +123,7 @@ if not spectral_df.empty:
 st.sidebar.header("Diagnostic Controls")
 
 scenario_dict = {
-    'Flag_A': ('A: Target Irrigation (Drought)', 'blue', 'Focuses on canopies with low water absorption but stable physical structure.', '**1. Inputs Used:** WBI_mn, NDVI_mn.\n**2. Purpose:** WBI monitors plant water status; NDVI tracks chlorophyll-driven vigor.\n**3. Scientific Conclusion:** Targets trees with minimal water status but high chlorophyll vigor. Identifies early-stage physiological drought.'),
+    'Flag_A': ('A: Target Irrigation (Drought)', 'blue', 'Focuses on canopies with low water absorption but stable physical structure.', '**1. Inputs Used:** WBI_mn, NDVI_mn, LAI_mn.\n**2. Purpose:** WBI monitors plant water status; NDVI & LAI track chlorophyll-driven vigor and mass.\n**3. Scientific Conclusion:** Targets trees with minimal water status but high chlorophyll vigor and structure. Identifies early-stage physiological drought.'),
     'Flag_B': ('B: Target Fertilizer (Hidden Hunger)', 'purple', 'Identifies physically large canopies with low chlorophyll/nitrogen concentration.', '**1. Inputs Used:** NDVI_mn, MCARI_mn.\n**2. Purpose:** NDVI captures total biomass; MCARI isolates chlorophyll concentration.\n**3. Scientific Conclusion:** Targets trees with high biomass but minimal chlorophyll. Indicates hidden hunger where trees are structurally mature but nitrogen-deficient.'),
     'Flag_C': ('C: Inspect Root Rot (Decline)', 'red', 'Flags mature trees exhibiting systemic thinning and active leaf breakdown.', '**1. Inputs Used:** Radius_m, LAI_mn, PSRI_mn.\n**2. Purpose:** Radius tracks growth; LAI monitors leaf area; PSRI captures stress-induced pigment changes.\n**3. Scientific Conclusion:** Targets mature trees with low leaf area and high senescence. Indicates potential root-zone decay.'),
     'Flag_D': ('D: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage.', '**1. Inputs Used:** NDVI_mn, NDVI_sd, NDVI_mi, CRI1_sd.\n**2. Purpose:** Quantifies asymmetric intra-canopy stress.\n**3. Scientific Conclusion:** Targets trees with acceptable overall vigor but extreme internal spectral variance. Precise signature of a localized foliar pathogen or acute pest infestation.'),
@@ -187,7 +194,7 @@ else:
     color = scenario_dict[selected_scenario][1]
 
 # --- 5. MAIN MAP LAYOUT ---
-col1, col2 = st.columns([3, 2]) # Adjusted ratio to give the plot more room
+col1, col2 = st.columns([3, 2]) 
 
 with col1:
     toggle_col1, toggle_col2 = st.columns(2)
@@ -228,7 +235,6 @@ with col1:
                 ).add_to(m)
         else:
             if not target_gdf.empty:
-                # Included generated_id in tooltip to link to the CSV data
                 available_fields = [f for f in ['generated_id', 'tree_id', 'NDVI_mn', 'LAI_mn', 'WBI_mn'] if f in gdf.columns]
                 available_aliases = [f"{f}:" for f in available_fields]
                 
@@ -267,9 +273,6 @@ with col2:
         # HYPERSPECTRAL PLOT INTEGRATION
         if not spectral_df.empty and selected_scenario != 'CHM_PROFILE':
             
-            # Check if user cl# HYPERSPECTRAL PLOT INTEGRATION
-         if not spectral_df.empty and selected_scenario != 'CHM_PROFILE':
-            
             # Check if user clicked a canopy on the map
             selected_canopy_id = None
             if st_data and st_data.get("last_active_drawing"):
@@ -277,7 +280,7 @@ with col2:
                 if "generated_id" in props:
                     selected_canopy_id = props["generated_id"]
             
-            # Helper function to add electromagnetic regions to any plot
+            # Helper function to add electromagnetic regions
             def add_em_regions(figure):
                 max_band = max(x_axis_labels) if x_axis_labels else 344
                 figure.add_vrect(x0=1, x1=160, fillcolor="#3498db", opacity=0.1, layer="below", line_width=0, annotation_text="Visible (VIS)", annotation_position="top left", annotation_font_size=10, annotation_font_color="#3498db")
@@ -285,15 +288,21 @@ with col2:
                 figure.add_vrect(x0=200, x1=max_band, fillcolor="#95a5a6", opacity=0.1, layer="below", line_width=0, annotation_text="Near-Infrared (NIR)", annotation_position="top left", annotation_font_size=10, annotation_font_color="#95a5a6")
                 return figure
 
+            # Calculate the True Healthy Baseline using the elite reference group
+            healthy_ref_ids = gdf[gdf['IS_HEALTHY_REF'] == True]['generated_id'].tolist()
+            if healthy_ref_ids:
+                baseline_spectra = spectral_df[spectral_df['generated_id'].isin(healthy_ref_ids)][band_cols].mean().values
+            else:
+                baseline_spectra = spectral_df[band_cols].mean().values # Fallback
+
             if selected_canopy_id:
                 # USER CLICKED A TREE: Plot Single Signature vs Baseline
                 st.subheader(f"Canopy {selected_canopy_id} Reflectance")
                 try:
                     canopy_data = spectral_df[spectral_df['generated_id'] == selected_canopy_id][band_cols].iloc[0].values
-                    baseline_spectra = spectral_df[band_cols].mean().values
                     
                     fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=x_axis_labels, y=baseline_spectra, mode='lines', name='Healthy Baseline', line=dict(color='lightgreen', dash='dash', width=2)))
+                    fig.add_trace(go.Scatter(x=x_axis_labels, y=baseline_spectra, mode='lines', name='Healthy Baseline (Top 25%)', line=dict(color='lightgreen', dash='dash', width=2)))
                     fig.add_trace(go.Scatter(x=x_axis_labels, y=canopy_data, mode='lines', name=f'Tree {selected_canopy_id}', line=dict(color='#00FFCC', width=2)))
                     
                     fig = add_em_regions(fig)
@@ -302,7 +311,7 @@ with col2:
                         title=f"Live Signature: Tree {selected_canopy_id} vs Baseline",
                         xaxis_title="Band Number (with EM Regions)",
                         yaxis_title="Reflectance",
-                        yaxis_range=[0, 0.45], # <--- ADD THIS LINE TO LOCK THE Y-AXIS
+                        yaxis_range=[0, 0.45], # Hardcoded to lock Y-axis scale
                         height=400,
                         margin=dict(l=0, r=0, t=30, b=0),
                         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
@@ -318,23 +327,23 @@ with col2:
                 
                 target_ids = target_gdf['generated_id'].tolist()
                 target_spectra = spectral_df[spectral_df['generated_id'].isin(target_ids)][band_cols].mean().values
-                baseline_spectra = spectral_df[band_cols].mean().values
                 
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=x_axis_labels, y=baseline_spectra, mode='lines', name='Healthy Baseline', line=dict(color='lightgreen', dash='dash', width=2)))
+                fig.add_trace(go.Scatter(x=x_axis_labels, y=baseline_spectra, mode='lines', name='Healthy Baseline (Top 25%)', line=dict(color='lightgreen', dash='dash', width=2)))
                 fig.add_trace(go.Scatter(x=x_axis_labels, y=target_spectra, mode='lines', name='Flagged Targets', line=dict(color='red', width=2)))
                 
                 fig = add_em_regions(fig)
                 
                 fig.update_layout(
-                        title=f"Live Signature: Tree {selected_canopy_id} vs Baseline",
-                        xaxis_title="Band Number (with EM Regions)",
-                        yaxis_title="Reflectance",
-                        yaxis_range=[0, 0.45], # <--- ADD THIS LINE TO LOCK THE Y-AXIS
-                        height=400,
-                        margin=dict(l=0, r=0, t=30, b=0),
-                        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
-                    )
+                    title="Average Target Variance",
+                    xaxis_title="Band Number (with EM Regions)",
+                    yaxis_title="Reflectance",
+                    yaxis_range=[0, 0.45], # Hardcoded to lock Y-axis scale
+                    height=400,
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+                )
+                st.plotly_chart(fig, use_container_width=True)
         
         elif spectral_df.empty:
              st.warning("⚠️ Hyperspectral CSV data not found. Upload 'master_hyperspectral_signatures_averaged.csv' to view curves.")
