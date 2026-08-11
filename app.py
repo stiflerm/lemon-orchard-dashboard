@@ -55,32 +55,35 @@ def load_and_process_data():
     # CRITICAL: Match the generated_id logic from the extraction script
     gdf['generated_id'] = range(1, len(gdf) + 1)
     
-    # Statistical Thresholds
+# Statistical Thresholds
     ndvi_mean = gdf['NDVI_mn'].mean()
     lai_mean = gdf['LAI_mn'].mean()
     psri_mean = gdf['PSRI_mn'].mean()
     radius_mean = gdf['Radius_m'].mean() if 'Radius_m' in gdf.columns else 1.0
     
     wbi_25 = gdf['WBI_mn'].quantile(0.25)
-    wbi_75 = gdf['WBI_mn'].quantile(0.75)
     ndvi_25 = gdf['NDVI_mn'].quantile(0.25)
     ndvi_75 = gdf['NDVI_mn'].quantile(0.75)
     mcari_25 = gdf['MCARI_mn'].quantile(0.25)
     lai_25 = gdf['LAI_mn'].quantile(0.25)
+    lai_75 = gdf['LAI_mn'].quantile(0.75)
     psri_75 = gdf['PSRI_mn'].quantile(0.75)
     ndvi_mi_25 = gdf['NDVI_mi'].quantile(0.25)
     ndvi_sd_75 = gdf['NDVI_sd'].quantile(0.75)
     cri1_sd_75 = gdf['CRI1_sd'].quantile(0.75)
     pri_25 = gdf['PRI_mn'].quantile(0.25)
     
-    # 1. Define the Elite Reference Group (Top 25% Vigor + Top 25% Water)
-    gdf['IS_HEALTHY_REF'] = (gdf['NDVI_mn'] >= ndvi_75) & (gdf['WBI_mn'] >= wbi_75)
+    # 1. Define the Elite Reference Group (The True Ceiling)
+    # Must be in the top 25% for both physical size (LAI) and greenness (NDVI).
+    # This guarantees the baseline curve will sit at the absolute top of the NIR spectrum.
+    gdf['IS_HEALTHY_REF'] = (gdf['NDVI_mn'] >= ndvi_75) & (gdf['LAI_mn'] >= lai_75)
     
     # 2. Apply Robust Logic Flags
-    # Flag A: Must be structurally larger than average, but severely dehydrated
-    gdf['Flag_A'] = (gdf['WBI_mn'] < wbi_25) & (gdf['NDVI_mn'] > ndvi_mean) & (gdf['LAI_mn'] > lai_mean)
+    # Flag A (Drought): Must have bottom 25% water, AND below-average structure (but not dead).
+    gdf['Flag_A'] = (gdf['WBI_mn'] < wbi_25) & (gdf['NDVI_mn'] <= ndvi_mean) & (gdf['NDVI_mn'] > ndvi_25)
     
-    gdf['Flag_B'] = (gdf['NDVI_mn'] > ndvi_mean) & (gdf['MCARI_mn'] < mcari_25) 
+    # Flag B (Hidden Hunger): High structure, low chlorophyll. 
+    gdf['Flag_B'] = (gdf['LAI_mn'] > lai_mean) & (gdf['MCARI_mn'] < mcari_25) 
     
     if 'Radius_m' in gdf.columns:
         gdf['Flag_C'] = (gdf['Radius_m'] > radius_mean) & (gdf['LAI_mn'] < lai_25) & (gdf['PSRI_mn'] > psri_75)
@@ -88,7 +91,9 @@ def load_and_process_data():
         gdf['Flag_C'] = (gdf['LAI_mn'] < lai_25) & (gdf['PSRI_mn'] > psri_75)
         
     gdf['Flag_D'] = (gdf['NDVI_mn'] > ndvi_25) & (gdf['NDVI_sd'] > ndvi_sd_75) & (gdf['CRI1_sd'] > cri1_sd_75) & (gdf['NDVI_mi'] < ndvi_mi_25) 
-    gdf['Flag_E'] = (gdf['PRI_mn'] < pri_25) & (gdf['LAI_mn'] > lai_25) & (gdf['WBI_mn'] > wbi_25) & (gdf['PSRI_mn'] > psri_mean) 
+    
+    # Flag E (Shock): Structure is stable, but light-use efficiency (PRI) is suppressed.
+    gdf['Flag_E'] = (gdf['PRI_mn'] < pri_25) & (gdf['LAI_mn'] > lai_25) & (gdf['PSRI_mn'] > psri_mean) 
     
     if 'CHM_max' in gdf.columns:
         gdf['CHM_PROFILE'] = gdf['CHM_max'] >= 0.5
@@ -123,11 +128,11 @@ if not spectral_df.empty:
 st.sidebar.header("Diagnostic Controls")
 
 scenario_dict = {
-    'Flag_A': ('A: Target Irrigation (Drought)', 'blue', 'Focuses on canopies with low water absorption but stable physical structure.', '**1. Inputs Used:** WBI_mn, NDVI_mn, LAI_mn.\n**2. Purpose:** WBI monitors plant water status; NDVI & LAI track chlorophyll-driven vigor and mass.\n**3. Scientific Conclusion:** Targets trees with minimal water status but high chlorophyll vigor and structure. Identifies early-stage physiological drought.'),
-    'Flag_B': ('B: Target Fertilizer (Hidden Hunger)', 'purple', 'Identifies physically large canopies with low chlorophyll/nitrogen concentration.', '**1. Inputs Used:** NDVI_mn, MCARI_mn.\n**2. Purpose:** NDVI captures total biomass; MCARI isolates chlorophyll concentration.\n**3. Scientific Conclusion:** Targets trees with high biomass but minimal chlorophyll. Indicates hidden hunger where trees are structurally mature but nitrogen-deficient.'),
+    'Flag_A': ('A: Target Irrigation (Drought)', 'blue', 'Focuses on canopies exhibiting physical depression due to severe dehydration.', '**1. Inputs Used:** WBI_mn, NDVI_mn.\n**2. Purpose:** WBI monitors plant water status; NDVI tracks overall vigor.\n**3. Scientific Conclusion:** Targets trees with minimal water status and below-average structural vigor. Identifies canopies actively suffering from physiological drought.'),
+    'Flag_B': ('B: Target Fertilizer (Hidden Hunger)', 'purple', 'Identifies physically large canopies with low chlorophyll/nitrogen concentration.', '**1. Inputs Used:** LAI_mn, MCARI_mn.\n**2. Purpose:** LAI captures total physical biomass; MCARI isolates chlorophyll concentration.\n**3. Scientific Conclusion:** Targets trees with high biomass but minimal chlorophyll. Indicates hidden hunger where trees are structurally mature but nitrogen-deficient.'),
     'Flag_C': ('C: Inspect Root Rot (Decline)', 'red', 'Flags mature trees exhibiting systemic thinning and active leaf breakdown.', '**1. Inputs Used:** Radius_m, LAI_mn, PSRI_mn.\n**2. Purpose:** Radius tracks growth; LAI monitors leaf area; PSRI captures stress-induced pigment changes.\n**3. Scientific Conclusion:** Targets mature trees with low leaf area and high senescence. Indicates potential root-zone decay.'),
     'Flag_D': ('D: Spot-Spray (Localized Pests)', 'darkred', 'Finds trees with extreme internal variance indicating localized damage.', '**1. Inputs Used:** NDVI_mn, NDVI_sd, NDVI_mi, CRI1_sd.\n**2. Purpose:** Quantifies asymmetric intra-canopy stress.\n**3. Scientific Conclusion:** Targets trees with acceptable overall vigor but extreme internal spectral variance. Precise signature of a localized foliar pathogen or acute pest infestation.'),
-    'Flag_E': ('E: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while structure and hydration remain stable.', '**1. Inputs Used:** PRI_mn, LAI_mn, WBI_mn, PSRI_mn.\n**2. Purpose:** PRI captures light-use efficiency.\n**3. Scientific Conclusion:** Targets trees with high structure/water but suppressed PRI. Indicates the light-harvesting mechanism has shut down due to acute thermal stress.'),
+    'Flag_E': ('E: Acute Heat/Frost Shock', 'cyan', 'Detects pre-visual shock via PRI drop while physical structure remains intact.', '**1. Inputs Used:** PRI_mn, LAI_mn, PSRI_mn.\n**2. Purpose:** PRI captures light-use efficiency; LAI confirms physical mass.\n**3. Scientific Conclusion:** Targets trees with intact physical structure but suppressed PRI. Indicates the light-harvesting mechanism has shut down due to acute thermal or systemic shock.'),
     'CHM_PROFILE': ('🌳 Canopy Height Profiling (CHM)', 'green', 'Maps the absolute vertical height of all established canopies.', '**1. Inputs Used:** CHM_max.\n**2. Purpose:** Isolates 3D structural data from 2D greenness.\n**3. Scientific Conclusion:** Maps the baseline vertical mass of the block, allowing visual assessment of orchard uniformity and pruning efficiency.'),
     'GAP_ANALYSIS': ('🍋 Geometric Gap & Yield Analysis', 'red', 'Calculates missing trees and yield loss percentage.', '**1. Inputs Used:** Geometric Centroids, X/Y Proximity.\n**2. Purpose:** Evaluates spatial topology.\n**3. Scientific Conclusion:** Extrapolates planting points where distance exceeds expected spacing to yield a direct count of missing crop positions.')
 }
