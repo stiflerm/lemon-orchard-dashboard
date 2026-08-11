@@ -302,6 +302,7 @@ with col2:
                         title=f"Live Signature: Tree {selected_canopy_id} vs Baseline",
                         xaxis_title="Band Number (with EM Regions)",
                         yaxis_title="Reflectance",
+                        yaxis_range=[0, 0.45], # <--- ADD THIS LINE TO LOCK THE Y-AXIS
                         height=400,
                         margin=dict(l=0, r=0, t=30, b=0),
                         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
