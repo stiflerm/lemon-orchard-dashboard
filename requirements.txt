@@ -10,3 +10,4 @@ matplotlib
 shapely
 scikit-learn
 plotly
+scipy
