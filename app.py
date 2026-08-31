@@ -55,6 +55,7 @@ indices from the spectral CSV.
 from __future__ import annotations
 
 import base64
+import html
 import io
 import math
 import os
@@ -232,6 +233,169 @@ def rank_biserial_from_u(u, n1, n2):
         return np.nan
     return (2.0 * u) / (n1 * n2) - 1.0
 
+
+# =============================================================================
+# 1B. FIELD-NAVIGATION / KML HELPERS
+# =============================================================================
+
+FIELD_FLAG_COLUMNS = [
+    "Flag_A", "Flag_B", "Flag_C", "Flag_D",
+    "Flag_E", "Flag_F", "Flag_G", "Flag_H",
+]
+
+
+def _kml_color_for_scenario(scenario_key: str) -> str:
+    """KML colors are AABBGGRR, not normal RGB."""
+    return {
+        "Flag_A": "ffff0000",       # blue
+        "Flag_B": "ffff00ff",       # magenta/purple
+        "Flag_C": "ff0000ff",       # red
+        "Flag_D": "ff000080",       # dark red
+        "Flag_E": "ffffff00",       # cyan
+        "Flag_F": "ff00a5ff",       # orange
+        "Flag_G": "ff0080ff",       # orange-red
+        "Flag_H": "ff00aa00",       # green
+        "HIGH_PRIORITY": "ff00ffff", # yellow
+    }.get(scenario_key, "ffffffff")
+
+
+def _short_flag_name(flag_col: str) -> str:
+    if flag_col.startswith("Flag_"):
+        return flag_col.replace("Flag_", "")
+    if flag_col == "HIGH_PRIORITY":
+        return "PRIORITY"
+    return str(flag_col)
+
+
+def make_navigation_points(source_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Create canopy-centroid navigation points and return them in EPSG:4326."""
+    if source_gdf is None or source_gdf.empty:
+        return gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
+
+    work = source_gdf.copy()
+    if work.crs is None:
+        raise ValueError("Canopy layer has no CRS; KML navigation coordinates cannot be generated safely.")
+
+    try:
+        if work.crs.is_geographic:
+            projected_crs = work.estimate_utm_crs()
+            if projected_crs is None:
+                raise ValueError("Could not estimate projected CRS.")
+            projected = work.to_crs(projected_crs)
+        else:
+            projected = work.copy()
+
+        points_projected = projected.copy()
+        points_projected.geometry = projected.geometry.centroid
+        points = points_projected.to_crs(epsg=4326)
+    except Exception:
+        # Fallback stays inside the crown if projected centroid creation fails.
+        points = work.to_crs(epsg=4326).copy()
+        points.geometry = points.geometry.representative_point()
+
+    points["Longitude"] = points.geometry.x
+    points["Latitude"] = points.geometry.y
+    return points
+
+
+def active_flags_for_row(row: pd.Series) -> str:
+    active = []
+    for flag in FIELD_FLAG_COLUMNS:
+        if flag in row.index:
+            try:
+                if bool(row[flag]):
+                    active.append(_short_flag_name(flag))
+            except Exception:
+                pass
+    return ",".join(active) if active else "None"
+
+
+def build_tree_navigation_kml(
+    source_gdf: gpd.GeoDataFrame,
+    layer_title: str,
+    scenario_key: str = "",
+) -> bytes:
+    """Create a mobile-ready KML file in memory, one placemark per tree."""
+    points = make_navigation_points(source_gdf)
+    if points.empty:
+        return b""
+
+    kml_color = _kml_color_for_scenario(scenario_key)
+    safe_title = html.escape(str(layer_title))
+
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<kml xmlns="http://www.opengis.net/kml/2.2">',
+        '<Document>',
+        f'<name>{safe_title}</name>',
+        '<Style id="treeTarget">',
+        '<IconStyle>',
+        f'<color>{kml_color}</color>',
+        '<scale>1.15</scale>',
+        '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>',
+        '</IconStyle>',
+        '<LabelStyle><scale>0.85</scale></LabelStyle>',
+        '</Style>',
+    ]
+
+    optional_fields = [
+        "NDVI_mn", "NDRE_mn", "WBI_mn", "PRI_mn", "PSRI_mn",
+        "CHM_P95", "CHM_max", "Domain_Count", "Overall_Evidence",
+        "Row_ID", "row_id", "Tree_in_row", "tree_in_row",
+    ]
+
+    for _, row in points.iterrows():
+        tree_id = row.get("generated_id", row.get("tree_id", "NA"))
+        try:
+            tree_label = f"T{int(tree_id)}"
+        except Exception:
+            tree_label = f"T{tree_id}"
+
+        scenario_text = active_flags_for_row(row)
+        point_name = (
+            f"{tree_label} [{_short_flag_name(scenario_key)}]"
+            if scenario_key else f"{tree_label} [{scenario_text}]"
+        )
+
+        description_lines = [
+            f"<b>Tree ID:</b> {html.escape(str(tree_id))}",
+            f"<b>Scenario(s):</b> {html.escape(scenario_text)}",
+            f"<b>Latitude:</b> {float(row['Latitude']):.7f}",
+            f"<b>Longitude:</b> {float(row['Longitude']):.7f}",
+        ]
+
+        if "tree_id" in row.index and pd.notna(row.get("tree_id")):
+            description_lines.insert(
+                1,
+                f"<b>Source tree_id:</b> {html.escape(str(row.get('tree_id')))}",
+            )
+
+        for field in optional_fields:
+            if field in row.index and pd.notna(row.get(field)):
+                value = row.get(field)
+                if isinstance(value, (float, np.floating)):
+                    value = f"{float(value):.4f}"
+                description_lines.append(
+                    f"<b>{html.escape(field)}:</b> {html.escape(str(value))}"
+                )
+
+        description = "<br>".join(description_lines)
+        lon = float(row["Longitude"])
+        lat = float(row["Latitude"])
+
+        parts.extend([
+            '<Placemark>',
+            f'<name>{html.escape(point_name)}</name>',
+            '<styleUrl>#treeTarget</styleUrl>',
+            f'<description><![CDATA[{description}]]></description>',
+            '<Point>',
+            f'<coordinates>{lon:.8f},{lat:.8f},0</coordinates>',
+            '</Point>',
+            '</Placemark>',
+        ])
+
+    parts.extend(['</Document>', '</kml>'])
+    return "\n".join(parts).encode("utf-8")
 
 # =============================================================================
 # 2. DATA INGESTION
@@ -1339,14 +1503,78 @@ with tab_map:
                 st.warning("Hyperspectral CSV not found; signature comparison is unavailable.")
 
             st.markdown("---")
-            st.header("📥 Export Targets")
+            st.header("📥 Export & Field Navigation")
+            st.caption(
+                "KML points are generated from projected canopy centroids and exported in WGS84. "
+                "Open them in Google Earth on your phone. Phone GPS can still be off by several metres, "
+                "so confirm the Tree ID against the UAV canopy layout when adjacent trees are close."
+            )
+
             if not target_gdf.empty:
-                st.download_button(
-                    f"Download {target_count} targets (GeoJSON)",
-                    target_gdf.to_json(),
-                    file_name=f"field_targets_{selected_scenario}.geojson",
-                    mime="application/geo+json",
-                )
+                export_col1, export_col2 = st.columns(2)
+
+                with export_col1:
+                    st.download_button(
+                        f"Download {target_count} targets (GeoJSON)",
+                        target_gdf.to_json(),
+                        file_name=f"field_targets_{selected_scenario}.geojson",
+                        mime="application/geo+json",
+                    )
+
+                with export_col2:
+                    active_kml = build_tree_navigation_kml(
+                        target_gdf,
+                        layer_title=scenario_dict[selected_scenario][0],
+                        scenario_key=selected_scenario,
+                    )
+                    st.download_button(
+                        f"📍 Download {target_count} targets (KML)",
+                        data=active_kml,
+                        file_name=f"field_navigation_{selected_scenario}.kml",
+                        mime="application/vnd.google-earth.kml+xml",
+                    )
+
+            # Combined navigation files are always available from the active map page.
+            available_field_flags = [f for f in FIELD_FLAG_COLUMNS if f in gdf.columns]
+            if available_field_flags:
+                all_flagged_mask = gdf[available_field_flags].fillna(False).astype(bool).any(axis=1)
+                all_flagged_gdf = gdf[all_flagged_mask].copy()
+            else:
+                all_flagged_gdf = gdf.iloc[0:0].copy()
+
+            if not all_flagged_gdf.empty:
+                nav_col1, nav_col2 = st.columns(2)
+
+                with nav_col1:
+                    all_kml = build_tree_navigation_kml(
+                        all_flagged_gdf,
+                        layer_title="All Flagged Orchard Trees",
+                    )
+                    st.download_button(
+                        f"🗺️ Download ALL flagged trees ({len(all_flagged_gdf)}) KML",
+                        data=all_kml,
+                        file_name="field_navigation_ALL_FLAGGED_TREES.kml",
+                        mime="application/vnd.google-earth.kml+xml",
+                    )
+
+                with nav_col2:
+                    # 2+ active A-H flags = field-navigation priority only.
+                    multi_flag_count = gdf[available_field_flags].fillna(False).astype(bool).sum(axis=1)
+                    multi_flag_gdf = gdf[multi_flag_count >= 2].copy()
+                    if not multi_flag_gdf.empty:
+                        priority_kml = build_tree_navigation_kml(
+                            multi_flag_gdf,
+                            layer_title="Multi-Flag Field Priority Trees",
+                            scenario_key="HIGH_PRIORITY",
+                        )
+                        st.download_button(
+                            f"⭐ Download multi-flag priority ({len(multi_flag_gdf)}) KML",
+                            data=priority_kml,
+                            file_name="field_navigation_MULTI_FLAG_PRIORITY.kml",
+                            mime="application/vnd.google-earth.kml+xml",
+                        )
+                    else:
+                        st.info("No trees currently have two or more A-H flags.")
 
 
 # -----------------------------------------------------------------------------
