@@ -1089,37 +1089,37 @@ def metric_threshold(metric):
     return mapping.get(metric, (None, None))
 
 
-def comparison_dot_plot(target_vals, reference_vals, metric, target_label="Highlighted", reference_label="Comparison", title=None):
-    """Show every tree as a point plus group median; easier to read than a box plot."""
-    tv = pd.to_numeric(pd.Series(target_vals), errors="coerce").dropna().to_numpy(float)
-    rv = pd.to_numeric(pd.Series(reference_vals), errors="coerce").dropna().to_numpy(float)
-    fig = go.Figure()
-    rng = np.random.default_rng(42)
-    if len(tv):
-        fig.add_trace(go.Scatter(
-            x=rng.normal(0, 0.045, len(tv)), y=tv, mode="markers", name=target_label,
-            marker=dict(size=7, opacity=0.50), hovertemplate=f"{target_label}<br>{metric}: %{{y:.4f}}<extra></extra>"
-        ))
-        fig.add_trace(go.Scatter(
-            x=[0], y=[float(np.median(tv))], mode="markers", name=f"{target_label} median",
-            marker=dict(size=15, symbol="diamond"), hovertemplate="Median: %{y:.4f}<extra></extra>"
-        ))
-    if len(rv):
-        fig.add_trace(go.Scatter(
-            x=rng.normal(1, 0.045, len(rv)), y=rv, mode="markers", name=reference_label,
-            marker=dict(size=7, opacity=0.38), hovertemplate=f"{reference_label}<br>{metric}: %{{y:.4f}}<extra></extra>"
-        ))
-        fig.add_trace(go.Scatter(
-            x=[1], y=[float(np.median(rv))], mode="markers", name=f"{reference_label} median",
-            marker=dict(size=15, symbol="diamond"), hovertemplate="Median: %{y:.4f}<extra></extra>"
-        ))
+def comparison_box_plot(target_vals, reference_vals, metric, target_label="Highlighted", reference_label="Comparison", title=None):
+    """Simple two-group box plot for target-versus-comparison distributions."""
+    tv = pd.to_numeric(pd.Series(target_vals), errors="coerce").dropna()
+    rv = pd.to_numeric(pd.Series(reference_vals), errors="coerce").dropna()
+
+    plot_df = pd.concat([
+        pd.DataFrame({"Group": target_label, "Value": tv.to_numpy(float)}),
+        pd.DataFrame({"Group": reference_label, "Value": rv.to_numpy(float)}),
+    ], ignore_index=True)
+
+    fig = px.box(
+        plot_df,
+        x="Group",
+        y="Value",
+        points=False,
+        category_orders={"Group": [target_label, reference_label]},
+        title=title or f"{metric}: highlighted vs comparison trees",
+    )
     thr, direction = metric_threshold(metric)
     if thr is not None and np.isfinite(thr):
-        fig.add_hline(y=thr, line_dash="dash", annotation_text=f"Operational threshold {direction} {thr:.3f}")
-    fig.update_xaxes(tickmode="array", tickvals=[0, 1], ticktext=[target_label, reference_label], range=[-0.35, 1.35], title="")
+        fig.add_hline(
+            y=thr,
+            line_dash="dash",
+            annotation_text=f"Operational threshold {direction} {thr:.3f}",
+        )
     fig.update_layout(
-        title=title or f"{metric}: individual trees and group medians",
-        yaxis_title=metric, height=420, showlegend=False, margin=dict(l=10, r=10, t=55, b=10)
+        yaxis_title=metric,
+        xaxis_title="",
+        height=420,
+        showlegend=False,
+        margin=dict(l=10, r=10, t=55, b=10),
     )
     return fig
 
@@ -1548,17 +1548,10 @@ with tab_validation:
         st.caption("Comparison trees have valid measurements for the selected scenario but do not meet that anomaly rule. They are not labelled 'healthy'.")
 
         if view == "STRUCTURE":
-            metric = "H_P95_m"
-            target_h = pd.to_numeric(gdf.loc[current_mask, metric], errors="coerce").dropna()
-            reference_h = pd.to_numeric(gdf.loc[reference_mask, metric], errors="coerce").dropna()
-            if len(target_h) or len(reference_h):
-                st.plotly_chart(
-                    comparison_dot_plot(target_h, reference_h, metric, "Low canopy stature", "Comparison", "LAS H-P95: every tree and the group median"),
-                    use_container_width=True,
-                )
-                m1, m2 = st.columns(2)
-                m1.metric("Low-stature median", f"{target_h.median():.2f} m" if len(target_h) else "NA")
-                m2.metric("Comparison median", f"{reference_h.median():.2f} m" if len(reference_h) else "NA")
+            st.info(
+                "A spectral signature comparison is not applicable to the Structure scenario because the finding is derived from height products, not spectral indices. "
+                "The H-P95 distribution is therefore shown only once in Section 3 below to avoid duplicating the same height comparison."
+            )
         else:
             band_cols = sorted([c for c in spectral_df.columns if str(c).startswith("Band_")], key=numeric_suffix) if not spectral_df.empty else []
             if not spectral_df.empty and band_cols and current_mask.any() and reference_mask.any():
@@ -1639,14 +1632,26 @@ with tab_validation:
         # 3. Target vs comparison values
         # ---------------------------------------------------------------------
         st.subheader("3. Target vs comparison values")
-        st.write("Each dot is one tree. The large diamond is the group median, and the dashed line is the operational threshold when applicable.")
+        st.write(
+            "The box plot compares the selected trees with valid comparison trees. "
+            "The line inside each box is the median, the box contains the middle 50% of values, and the whiskers show the broader spread. "
+            "The dashed line is the operational threshold when one is defined."
+        )
         metrics = [m for m in scenario_metrics(view) if m in gdf.columns]
         if metrics and current_mask.any() and reference_mask.any():
             choice = st.selectbox("Choose an indicator to compare", metrics, key=f"indicator_compare_{view}")
             target_vals = pd.to_numeric(gdf.loc[current_mask, choice], errors="coerce").dropna()
             ref_vals = pd.to_numeric(gdf.loc[reference_mask, choice], errors="coerce").dropna()
             if len(target_vals) or len(ref_vals):
-                fig = comparison_dot_plot(target_vals, ref_vals, choice, "Highlighted", "Comparison", f"{choice}: every tree and the group median")
+                target_label = "Low canopy stature" if view == "STRUCTURE" else "Highlighted"
+                fig = comparison_box_plot(
+                    target_vals,
+                    ref_vals,
+                    choice,
+                    target_label,
+                    "Comparison",
+                    f"{choice}: {target_label} vs comparison trees",
+                )
                 st.plotly_chart(fig, use_container_width=True)
             stats_df = comparison_statistics(gdf, current_mask, reference_mask, metrics)
             with st.expander("Research statistics for all indicators"):
