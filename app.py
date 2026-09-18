@@ -1,5 +1,5 @@
 """
-Orchard Diagnostic Intelligence v5 — Supported-Evidence Three-Domain DSS
+Orchard Diagnostic Intelligence v6 — Conservative Supported-Evidence Three-Domain DSS
 ===============================================================
 
 Final deterministic domains
@@ -14,7 +14,7 @@ It does NOT recalculate the hyperspectral or LAS measurements used for diagnosis
 Preferred input
 ---------------
 project/
-  orchard_diagnostic_intelligence_v5_supported_evidence.py
+  orchard_diagnostic_intelligence_v6_conservative_structure.py
   data/
     data.zip
     master_tree_multidomain_FINAL_compact.csv
@@ -208,6 +208,13 @@ def as_bool(series):
     if series.dtype == bool:
         return series.fillna(False)
     return series.astype(str).str.strip().str.lower().isin(["true", "1", "yes"])
+
+
+def supported_structure_mask(df):
+    """Conservative public structural result: BOTH LAS low stature and raster CHM corroboration must agree."""
+    low = as_bool(df["STRUCTURE_LOW_STATURE"]) if "STRUCTURE_LOW_STATURE" in df.columns else pd.Series(False, index=df.index)
+    corroborated = as_bool(df["STRUCTURE_CORROBORATED"]) if "STRUCTURE_CORROBORATED" in df.columns else pd.Series(False, index=df.index)
+    return (low & corroborated).fillna(False)
 
 
 def valid_index(df, value_col, qc_col):
@@ -566,8 +573,7 @@ def add_user_labels(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     water_supported = as_bool(out["WATER_SUPPORTED"]) if "WATER_SUPPORTED" in out.columns else pd.Series(False, index=out.index)
     bio_supported = as_bool(out["BIOCHEMICAL_SUPPORTED"]) if "BIOCHEMICAL_SUPPORTED" in out.columns else pd.Series(False, index=out.index)
-    structure_low = as_bool(out["STRUCTURE_LOW_STATURE"]) if "STRUCTURE_LOW_STATURE" in out.columns else pd.Series(False, index=out.index)
-    structure_cor = as_bool(out["STRUCTURE_CORROBORATED"]) if "STRUCTURE_CORROBORATED" in out.columns else pd.Series(False, index=out.index)
+    structure_supported = supported_structure_mask(out)
 
     out["Water finding"] = np.where(water_supported, "Water anomaly", "")
     if "WATER_EVIDENCE_STATUS" in out.columns:
@@ -579,12 +585,11 @@ def add_user_labels(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         strong = out["BIOCHEMICAL_STATUS"].eq("STRONG_CONCORDANT_BIOCHEMICAL_DECLINE") & bio_supported
         out.loc[strong, "Biochemical finding"] = "Biochemical anomaly + ARI1 support"
 
-    out["Structure finding"] = np.where(structure_low, "Low canopy stature", "")
-    out["Raster support"] = np.where(structure_low & structure_cor, "Yes", np.where(structure_low, "No", ""))
+    out["Structure finding"] = np.where(structure_supported, "Low canopy stature", "")
 
     out["Combined finding"] = ""
     out.loc[water_supported & bio_supported, "Combined finding"] = "Water + Biochemical"
-    out.loc[water_supported & bio_supported & structure_low, "Combined finding"] = "Water + Biochemical + Low Canopy Stature"
+    out.loc[water_supported & bio_supported & structure_supported, "Combined finding"] = "Water + Biochemical + Low Canopy Stature"
     return out
 
 
@@ -614,8 +619,6 @@ STRUCT_TOOLTIP = [
     ("Structure finding", "Result"),
     ("H_P95_m", "LAS H-P95 (m)"),
     ("RASTER_CHM_P95_m", "Raster CHM P95 (m)"),
-    ("Raster support", "Raster support"),
-    ("H_IQR_m", "H-IQR (context)"),
 ]
 
 COMBINED_TOOLTIP = [
@@ -634,7 +637,6 @@ COMBINED_TOOLTIP = [
     ("SIPI_VALUE", "SIPI"),
     ("ARI1_VALUE", "ARI1"),
     ("H_P95_m", "LAS H-P95 (m)"),
-    ("Raster support", "Raster support"),
 ]
 
 
@@ -655,7 +657,7 @@ def human_pattern(value):
 def make_target_mask(gdf, view):
     W = as_bool(gdf["WATER_SUPPORTED"])
     B = as_bool(gdf["BIOCHEMICAL_SUPPORTED"])
-    S = as_bool(gdf["STRUCTURE_LOW_STATURE"])
+    S = supported_structure_mask(gdf)
 
     if view == "WATER":
         return W
@@ -664,28 +666,33 @@ def make_target_mask(gdf, view):
     if view == "STRUCTURE":
         return S
     if view == "WB":
-        # Exactly the two supported spectral domains, with structure valid and not low.
-        structure_no_low = gdf.get("STRUCTURE_STATUS_FINAL", pd.Series("", index=gdf.index)).eq("NO_LOW_STATURE_EVIDENCE")
-        return W & B & structure_no_low
+        # Exact two-domain public result: Water + Biochemical without the conservative dual-measurement structure result.
+        return W & B & ~S
     if view == "WBS":
         return W & B & S
     return pd.Series(False, index=gdf.index)
 
 
 def comparison_reference_mask(gdf, view):
-    """Scenario-specific valid comparison group. Never labelled 'healthy'."""
+    """Scenario-specific clean comparison group. Never labelled 'healthy'."""
     water_no = gdf.get("WATER_EVIDENCE_STATUS", pd.Series("", index=gdf.index)).eq("NO_CONCORDANT_WATER_ANOMALY")
     bio_no = gdf.get("BIOCHEMICAL_STATUS", pd.Series("", index=gdf.index)).eq("NO_CONCORDANT_BIOCHEMICAL_DECLINE")
-    struct_no = gdf.get("STRUCTURE_STATUS_FINAL", pd.Series("", index=gdf.index)).eq("NO_LOW_STATURE_EVIDENCE")
+
+    h95 = pd.to_numeric(gdf.get("H_P95_m"), errors="coerce")
+    r95 = pd.to_numeric(gdf.get("RASTER_CHM_P95_m"), errors="coerce")
+    struct_no = (
+        h95.notna() & r95.notna()
+        & (h95 > STRUCTURE_THRESHOLDS["H_P95_P25_M"])
+        & (r95 > STRUCTURE_THRESHOLDS["RASTER_CHM_P95_P25_M"])
+    )
+
     if view == "WATER":
         return water_no
     if view == "BIOCHEMICAL":
         return bio_no
     if view == "STRUCTURE":
         return struct_no
-    if view == "WB":
-        return water_no & bio_no & struct_no
-    if view == "WBS":
+    if view in {"WB", "WBS"}:
         return water_no & bio_no & struct_no
     return pd.Series(False, index=gdf.index)
 
@@ -706,7 +713,7 @@ def scenario_metrics(view):
     if view == "BIOCHEMICAL":
         return ["NDRE_VALUE", "CIRED_EDGE_VALUE", "REP_D1_NM_VALUE", "PSRI_VALUE", "SIPI_VALUE", "ARI1_VALUE"]
     if view == "STRUCTURE":
-        return ["H_P95_m", "RASTER_CHM_P95_m", "H_IQR_m"]
+        return ["H_P95_m", "RASTER_CHM_P95_m"]
     return [
         "WBI_VALUE", "NDMI2_VALUE", "NDSI_RWC_VALUE", "PRI_VALUE",
         "NDRE_VALUE", "CIRED_EDGE_VALUE", "REP_D1_NM_VALUE", "PSRI_VALUE", "SIPI_VALUE", "ARI1_VALUE",
@@ -874,8 +881,10 @@ def sensitivity_domain_masks(df, scheme):
     PSRI, SIPI = num("PSRI_VALUE"), num("SIPI_VALUE")
     bio = NDRE.notna() & CI.notna() & REP.notna() & PSRI.notna() & SIPI.notna() & (NDRE <= bt["NDRE"]) & (CI <= bt["CIRED"]) & (REP <= bt["REP"]) & (PSRI >= bt["PSRI"]) & (SIPI >= bt["SIPI"])
     h95 = num("H_P95_m")
+    r95 = num("RASTER_CHM_P95_m")
     s_thr = {"P20": STRUCTURE_THRESHOLDS["H_P95_P20_M"], "P25": STRUCTURE_THRESHOLDS["H_P95_P25_M"], "P30": STRUCTURE_THRESHOLDS["H_P95_P30_M"]}[scheme]
-    structure = h95.notna() & (h95 <= s_thr)
+    # Public structural rule is conservative: vary the primary LAS threshold while keeping the finalized raster corroboration threshold fixed.
+    structure = h95.notna() & r95.notna() & (h95 <= s_thr) & (r95 <= STRUCTURE_THRESHOLDS["RASTER_CHM_P95_P25_M"])
     return water.fillna(False), bio.fillna(False), structure.fillna(False)
 
 
@@ -919,7 +928,7 @@ def pca_feature_space(df, features, target_mask, reference_mask):
     X = StandardScaler().fit_transform(X)
     pca = PCA(n_components=2)
     pcs = pca.fit_transform(X)
-    group = np.where(target_mask, "Highlighted", np.where(reference_mask, "Internal reference", "Other"))
+    group = np.where(target_mask, "Highlighted", np.where(reference_mask, "Comparison", "Other"))
     out = pd.DataFrame({"PC1": pcs[:,0], "PC2": pcs[:,1], "Group": group, "tree_id": df["tree_id"].values})
     return out, pca.explained_variance_ratio_*100, available
 
@@ -1062,6 +1071,59 @@ def count_bar(labels, counts, title):
     return fig
 
 
+def metric_threshold(metric):
+    mapping = {
+        "WBI_VALUE": (WATER_SENSITIVITY_THRESHOLDS["P25"]["WBI_LOW_MAX"], "≤"),
+        "NDMI2_VALUE": (WATER_SENSITIVITY_THRESHOLDS["P25"]["NDMI2_HIGH_MIN"], "≥"),
+        "NDSI_RWC_VALUE": (WATER_SENSITIVITY_THRESHOLDS["P25"]["NDSI_RWC_LOW_MAX"], "≤"),
+        "PRI_VALUE": (WATER_SENSITIVITY_THRESHOLDS["P25"]["PRI_LOW_MAX"], "≤"),
+        "NDRE_VALUE": (BIO_THRESHOLDS["NDRE_LOW_MAX"], "≤"),
+        "CIRED_EDGE_VALUE": (BIO_THRESHOLDS["CIRED_LOW_MAX"], "≤"),
+        "REP_D1_NM_VALUE": (BIO_THRESHOLDS["REP_LOW_MAX_NM"], "≤"),
+        "PSRI_VALUE": (BIO_THRESHOLDS["PSRI_HIGH_MIN"], "≥"),
+        "SIPI_VALUE": (BIO_THRESHOLDS["SIPI_HIGH_MIN"], "≥"),
+        "ARI1_VALUE": (BIO_THRESHOLDS["ARI1_HIGH_MIN"], "≥"),
+        "H_P95_m": (STRUCTURE_THRESHOLDS["H_P95_P25_M"], "≤"),
+        "RASTER_CHM_P95_m": (STRUCTURE_THRESHOLDS["RASTER_CHM_P95_P25_M"], "≤"),
+    }
+    return mapping.get(metric, (None, None))
+
+
+def comparison_dot_plot(target_vals, reference_vals, metric, target_label="Highlighted", reference_label="Comparison", title=None):
+    """Show every tree as a point plus group median; easier to read than a box plot."""
+    tv = pd.to_numeric(pd.Series(target_vals), errors="coerce").dropna().to_numpy(float)
+    rv = pd.to_numeric(pd.Series(reference_vals), errors="coerce").dropna().to_numpy(float)
+    fig = go.Figure()
+    rng = np.random.default_rng(42)
+    if len(tv):
+        fig.add_trace(go.Scatter(
+            x=rng.normal(0, 0.045, len(tv)), y=tv, mode="markers", name=target_label,
+            marker=dict(size=7, opacity=0.50), hovertemplate=f"{target_label}<br>{metric}: %{{y:.4f}}<extra></extra>"
+        ))
+        fig.add_trace(go.Scatter(
+            x=[0], y=[float(np.median(tv))], mode="markers", name=f"{target_label} median",
+            marker=dict(size=15, symbol="diamond"), hovertemplate="Median: %{y:.4f}<extra></extra>"
+        ))
+    if len(rv):
+        fig.add_trace(go.Scatter(
+            x=rng.normal(1, 0.045, len(rv)), y=rv, mode="markers", name=reference_label,
+            marker=dict(size=7, opacity=0.38), hovertemplate=f"{reference_label}<br>{metric}: %{{y:.4f}}<extra></extra>"
+        ))
+        fig.add_trace(go.Scatter(
+            x=[1], y=[float(np.median(rv))], mode="markers", name=f"{reference_label} median",
+            marker=dict(size=15, symbol="diamond"), hovertemplate="Median: %{y:.4f}<extra></extra>"
+        ))
+    thr, direction = metric_threshold(metric)
+    if thr is not None and np.isfinite(thr):
+        fig.add_hline(y=thr, line_dash="dash", annotation_text=f"Operational threshold {direction} {thr:.3f}")
+    fig.update_xaxes(tickmode="array", tickvals=[0, 1], ticktext=[target_label, reference_label], range=[-0.35, 1.35], title="")
+    fig.update_layout(
+        title=title or f"{metric}: individual trees and group medians",
+        yaxis_title=metric, height=420, showlegend=False, margin=dict(l=10, r=10, t=55, b=10)
+    )
+    return fig
+
+
 def numeric_suffix(value):
     m = re.search(r"(-?\d+(?:\.\d+)?)$", str(value))
     return float(m.group(1)) if m else float("inf")
@@ -1131,9 +1193,7 @@ def sensitivity_target_mask(df, view, scheme, combined_mode=None):
     if view == "STRUCTURE":
         return S
     if view == "WB":
-        # Exact two-domain sensitivity: Water + Biochemical with a valid structural value above the low-stature threshold.
-        h95 = pd.to_numeric(df.get("H_P95_m"), errors="coerce")
-        return W & B & h95.notna() & ~S
+        return W & B & ~S
     if view == "WBS":
         return W & B & S
     return pd.Series(False, index=df.index)
@@ -1161,24 +1221,22 @@ def threshold_table_for_view(view):
         if view in {"STRUCTURE", "WB", "WBS"}:
             s_thr = {"P20": STRUCTURE_THRESHOLDS["H_P95_P20_M"], "P25": STRUCTURE_THRESHOLDS["H_P95_P25_M"], "P30": STRUCTURE_THRESHOLDS["H_P95_P30_M"]}[scheme]
             rows.append([scheme, "Structure", "LAS H-P95", f"≤ {s_thr:.3f} m"])
+            rows.append([scheme, "Structure", "Raster CHM P95", f"≤ {STRUCTURE_THRESHOLDS['RASTER_CHM_P95_P25_M']:.3f} m (fixed corroboration)"])
     return pd.DataFrame(rows, columns=["Sensitivity scheme", "Domain", "Indicator", "Condition"])
 
 
 def relevant_cross_domain_counts(gdf):
-    patterns = [
-        "WATER_BIOCHEMICAL_ONLY",
-        "WATER_STRUCTURE_ONLY",
-        "BIOCHEMICAL_STRUCTURE_ONLY",
-        "WATER_BIOCHEMICAL_STRUCTURE",
+    """Cross-domain combinations using the conservative public structure definition (LAS + raster agreement)."""
+    W = as_bool(gdf["WATER_SUPPORTED"])
+    B = as_bool(gdf["BIOCHEMICAL_SUPPORTED"])
+    S = supported_structure_mask(gdf)
+    rows = [
+        ["Water + Biochemical", int((W & B & ~S).sum())],
+        ["Water + Low Canopy Stature", int((W & S & ~B).sum())],
+        ["Biochemical + Low Canopy Stature", int((B & S & ~W).sum())],
+        ["Water + Biochemical + Low Canopy Stature", int((W & B & S).sum())],
     ]
-    labels = {
-        "WATER_BIOCHEMICAL_ONLY": "Water + Biochemical",
-        "WATER_STRUCTURE_ONLY": "Water + Low Canopy Stature",
-        "BIOCHEMICAL_STRUCTURE_ONLY": "Biochemical + Low Canopy Stature",
-        "WATER_BIOCHEMICAL_STRUCTURE": "Water + Biochemical + Low Canopy Stature",
-    }
-    vc = gdf["CROSS_DOMAIN_PATTERN"].value_counts() if "CROSS_DOMAIN_PATTERN" in gdf.columns else pd.Series(dtype=int)
-    return pd.DataFrame({"Combination": [labels[p] for p in patterns], "Trees": [int(vc.get(p, 0)) for p in patterns]})
+    return pd.DataFrame(rows, columns=["Combination", "Trees"])
 
 
 
@@ -1261,7 +1319,7 @@ with tab_map:
         st.write("Highlighted trees show agreement between the chlorophyll/red-edge block and the pigment/senescence block. ARI1 can provide additional support.")
     elif view == "STRUCTURE":
         st.header("🌳 Low canopy stature")
-        st.write("Highlighted trees have orchard-relative low LAS H-P95. Raster CHM support is shown in the tree popup as an independent measurement check.")
+        st.write("Highlighted trees are the conservative structural subset where both LAS H-P95 and raster CHM P95 agree that canopy stature is low.")
     elif view == "WB":
         st.header("🔗 Water + Biochemical")
         st.write("Highlighted trees have supported Water and Biochemical anomalies, while the available structural result does not meet the low-stature rule.")
@@ -1364,26 +1422,41 @@ with tab_evidence:
         st.plotly_chart(fig, use_container_width=True)
 
     elif view == "STRUCTURE":
-        low = as_bool(gdf["STRUCTURE_LOW_STATURE"])
-        cor = as_bool(gdf["STRUCTURE_CORROBORATED"])
-        supported_raster = low & cor
-        las_only = low & ~cor
-        c1, c2, c3 = st.columns(3)
-        with c1: status_card("Primary structural measure", "LAS H-P95", f"Low canopy stature ≤ {STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m", "🌳")
-        with c2: status_card("Independent raster check", "Raster CHM P95", "Used as measurement support, not a second biological vote", "🛰️")
-        with c3: status_card("Canopy variability", "H-IQR", "Context only; it does not create the low-stature class", "📐")
+        supported_structure = supported_structure_mask(gdf)
+        h95 = pd.to_numeric(gdf.get("H_P95_m"), errors="coerce")
+        valid_struct = h95.notna() & ~gdf.get("STRUCTURE_STATUS_FINAL", pd.Series("", index=gdf.index)).eq("NOT_ASSESSABLE")
+        orchard_vals = h95[valid_struct].dropna()
+        target_vals = h95[supported_structure].dropna()
+        orchard_median = float(orchard_vals.median()) if len(orchard_vals) else np.nan
+        orchard_mean = float(orchard_vals.mean()) if len(orchard_vals) else np.nan
+        target_median = float(target_vals.median()) if len(target_vals) else np.nan
+        diff_pct = (100.0 * (orchard_median - target_median) / orchard_median) if np.isfinite(orchard_median) and orchard_median != 0 and np.isfinite(target_median) else np.nan
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Highlighted low-stature trees", int(supported_structure.sum()))
+        c2.metric("Orchard median H-P95", f"{orchard_median:.2f} m" if np.isfinite(orchard_median) else "NA")
+        c3.metric("Highlighted median H-P95", f"{target_median:.2f} m" if np.isfinite(target_median) else "NA")
+        c4.metric("Median height difference", f"{diff_pct:.1f}% lower" if np.isfinite(diff_pct) else "NA")
+
         st.markdown("### Decision rule")
-        st.markdown(f"**LAS H-P95 ≤ {STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m**  →  **Low canopy stature**. Raster CHM can independently support that measurement.")
-        fig = count_bar(
-            ["Low canopy stature (LAS H-P95)", "Low stature + raster support", "Low stature from LAS only"],
-            [int(low.sum()), int(supported_raster.sum()), int(las_only.sum())],
-            "Structural evidence"
+        st.markdown(
+            f"A tree is shown here only when **both structural measurements agree**: "
+            f"LAS H-P95 ≤ **{STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m** and "
+            f"raster CHM P95 ≤ **{STRUCTURE_THRESHOLDS['RASTER_CHM_P95_P25_M']:.3f} m**."
         )
+        med = pd.DataFrame({
+            "Group": ["Whole orchard", "Highlighted low-stature trees"],
+            "Median H-P95 (m)": [orchard_median, target_median],
+        })
+        fig = px.bar(med, x="Group", y="Median H-P95 (m)", text="Median H-P95 (m)", title="Typical canopy height: orchard vs highlighted trees")
+        fig.update_traces(texttemplate="%{text:.2f} m", textposition="outside")
+        fig.add_hline(y=STRUCTURE_THRESHOLDS["H_P95_P25_M"], line_dash="dash", annotation_text="LAS operational threshold")
         st.plotly_chart(fig, use_container_width=True)
-        st.caption("Low canopy stature is an orchard-relative structural finding; it is not itself a disease diagnosis.")
+        st.caption(f"Orchard mean H-P95 = {orchard_mean:.2f} m." if np.isfinite(orchard_mean) else "")
+        st.caption("This is a conservative orchard-relative structural finding based on agreement between two height products; it is not a disease diagnosis.")
 
     elif view == "WB":
-        W = as_bool(gdf["WATER_SUPPORTED"]); B = as_bool(gdf["BIOCHEMICAL_SUPPORTED"]); S = as_bool(gdf["STRUCTURE_LOW_STATURE"])
+        W = as_bool(gdf["WATER_SUPPORTED"]); B = as_bool(gdf["BIOCHEMICAL_SUPPORTED"]); S = supported_structure_mask(gdf)
         st.markdown("### Two-domain combination")
         st.markdown("**Water anomaly** + **Biochemical anomaly** + *no low-stature result* → **Water + Biochemical**")
         c1, c2, c3 = st.columns(3)
@@ -1393,7 +1466,7 @@ with tab_evidence:
         st.info("This view is intentionally separate from the three-domain view below.")
 
     elif view == "WBS":
-        W = as_bool(gdf["WATER_SUPPORTED"]); B = as_bool(gdf["BIOCHEMICAL_SUPPORTED"]); S = as_bool(gdf["STRUCTURE_LOW_STATURE"])
+        W = as_bool(gdf["WATER_SUPPORTED"]); B = as_bool(gdf["BIOCHEMICAL_SUPPORTED"]); S = supported_structure_mask(gdf)
         st.markdown("### Three-domain combination")
         st.markdown("**Water anomaly** + **Biochemical anomaly** + **Low canopy stature** → **Three-domain cross-domain anomaly**")
         c1, c2, c3, c4 = st.columns(4)
@@ -1411,7 +1484,7 @@ with tab_summary:
     st.header("Orchard at a glance")
     W = as_bool(gdf["WATER_SUPPORTED"])
     B = as_bool(gdf["BIOCHEMICAL_SUPPORTED"])
-    S = as_bool(gdf["STRUCTURE_LOW_STATURE"])
+    S = supported_structure_mask(gdf)
     exact_wb = make_target_mask(gdf, "WB")
     triple = make_target_mask(gdf, "WBS")
 
@@ -1441,7 +1514,7 @@ with tab_summary:
 
     with st.expander("Download supported orchard results"):
         cols = [
-            "tree_id", "Water finding", "Biochemical finding", "Structure finding", "Raster support",
+            "tree_id", "Water finding", "Biochemical finding", "Structure finding",
             "CROSS_DOMAIN_PATTERN", "WBI_VALUE", "NDMI2_VALUE", "NDSI_RWC_VALUE", "PRI_VALUE",
             "NDRE_VALUE", "CIRED_EDGE_VALUE", "REP_D1_NM_VALUE", "PSRI_VALUE", "SIPI_VALUE", "ARI1_VALUE",
             "H_P95_m", "RASTER_CHM_P95_m"
@@ -1468,7 +1541,7 @@ with tab_validation:
         # ---------------------------------------------------------------------
         # 1. Spectral / structural signature comparison
         # ---------------------------------------------------------------------
-        st.subheader("1. Signature comparison: highlighted trees vs valid comparison trees")
+        st.subheader("1. Target vs comparison profile")
         c1, c2 = st.columns(2)
         c1.metric("Highlighted trees", int(current_mask.sum()))
         c2.metric("Comparison trees", int(reference_mask.sum()))
@@ -1478,14 +1551,14 @@ with tab_validation:
             metric = "H_P95_m"
             target_h = pd.to_numeric(gdf.loc[current_mask, metric], errors="coerce").dropna()
             reference_h = pd.to_numeric(gdf.loc[reference_mask, metric], errors="coerce").dropna()
-            comp = pd.concat([
-                pd.DataFrame({"LAS H-P95 (m)": target_h.values, "Group": "Low canopy stature"}),
-                pd.DataFrame({"LAS H-P95 (m)": reference_h.values, "Group": "Comparison"}),
-            ], ignore_index=True)
-            if not comp.empty:
-                fig = px.box(comp, x="Group", y="LAS H-P95 (m)", points="all", title="Structural height comparison")
-                fig.add_hline(y=STRUCTURE_THRESHOLDS["H_P95_P25_M"], line_dash="dash", annotation_text="Operational P25-derived threshold")
-                st.plotly_chart(fig, use_container_width=True)
+            if len(target_h) or len(reference_h):
+                st.plotly_chart(
+                    comparison_dot_plot(target_h, reference_h, metric, "Low canopy stature", "Comparison", "LAS H-P95: every tree and the group median"),
+                    use_container_width=True,
+                )
+                m1, m2 = st.columns(2)
+                m1.metric("Low-stature median", f"{target_h.median():.2f} m" if len(target_h) else "NA")
+                m2.metric("Comparison median", f"{reference_h.median():.2f} m" if len(reference_h) else "NA")
         else:
             band_cols = sorted([c for c in spectral_df.columns if str(c).startswith("Band_")], key=numeric_suffix) if not spectral_df.empty else []
             if not spectral_df.empty and band_cols and current_mask.any() and reference_mask.any():
@@ -1505,6 +1578,18 @@ with tab_validation:
                         fig = add_rule_regions(fig, view, true_wavelength)
                         fig.update_layout(title="Consensus canopy spectral signatures", xaxis_title=x_title, yaxis_title="Reflectance", height=460)
                         st.plotly_chart(fig, use_container_width=True)
+
+                        delta = tm - rm
+                        dfig = go.Figure()
+                        dfig.add_trace(go.Scatter(x=x, y=delta, mode="lines", name="Highlighted − Comparison"))
+                        dfig.add_hline(y=0, line_dash="dash")
+                        dfig = add_rule_regions(dfig, view, true_wavelength)
+                        dfig.update_layout(
+                            title="Where the spectra differ (Highlighted − Comparison)",
+                            xaxis_title=x_title, yaxis_title="Reflectance difference", height=330, showlegend=False
+                        )
+                        st.plotly_chart(dfig, use_container_width=True)
+                        st.caption("Values above zero mean the highlighted group reflects more at that wavelength; values below zero mean it reflects less. Rule-sensitive wavelengths are shaded when an exact mapping is available.")
                         if true_wavelength:
                             st.caption(f"Rule-sensitive wavelength regions are highlighted. Wavelength source: {wl_source or 'resolved mapping'}.")
                         else:
@@ -1551,20 +1636,17 @@ with tab_validation:
             st.dataframe(threshold_table_for_view(view), hide_index=True, use_container_width=True)
 
         # ---------------------------------------------------------------------
-        # 3. Indicator separation
+        # 3. Target vs comparison values
         # ---------------------------------------------------------------------
-        st.subheader("3. Indicator separation")
+        st.subheader("3. Target vs comparison values")
+        st.write("Each dot is one tree. The large diamond is the group median, and the dashed line is the operational threshold when applicable.")
         metrics = [m for m in scenario_metrics(view) if m in gdf.columns]
         if metrics and current_mask.any() and reference_mask.any():
             choice = st.selectbox("Choose an indicator to compare", metrics, key=f"indicator_compare_{view}")
             target_vals = pd.to_numeric(gdf.loc[current_mask, choice], errors="coerce").dropna()
             ref_vals = pd.to_numeric(gdf.loc[reference_mask, choice], errors="coerce").dropna()
-            plot_df = pd.concat([
-                pd.DataFrame({"Value": target_vals.values, "Group": "Highlighted"}),
-                pd.DataFrame({"Value": ref_vals.values, "Group": "Comparison"}),
-            ], ignore_index=True)
-            if not plot_df.empty:
-                fig = px.box(plot_df, x="Group", y="Value", points="all", title=f"{choice}: highlighted vs comparison trees")
+            if len(target_vals) or len(ref_vals):
+                fig = comparison_dot_plot(target_vals, ref_vals, choice, "Highlighted", "Comparison", f"{choice}: every tree and the group median")
                 st.plotly_chart(fig, use_container_width=True)
             stats_df = comparison_statistics(gdf, current_mask, reference_mask, metrics)
             with st.expander("Research statistics for all indicators"):
@@ -1577,23 +1659,20 @@ with tab_validation:
             st.info("Not enough observations for indicator comparison.")
 
         # ---------------------------------------------------------------------
-        # 4. Structural cross-check
+        # 4. Height / structure overlap
         # ---------------------------------------------------------------------
-        st.subheader("4. Structural cross-check")
-        low = as_bool(gdf["STRUCTURE_LOW_STATURE"])
-        cor = as_bool(gdf["STRUCTURE_CORROBORATED"])
+        st.subheader("4. Height / structure overlap")
+        S_supported = supported_structure_mask(gdf)
         if view == "STRUCTURE":
-            c1, c2 = st.columns(2)
-            c1.metric("Low canopy stature trees", int(current_mask.sum()))
-            c2.metric("With raster support", int((current_mask & cor).sum()))
-            st.caption("Raster CHM P95 is an independent measurement check; it is not counted as a separate biological domain.")
+            st.info("Every highlighted tree in this scenario already meets the conservative dual-measurement low-stature rule, so no additional raster-support category is needed.")
         elif view == "WB":
-            st.info("This scenario is deliberately defined as Water + Biochemical without low canopy stature, so structural overlap is not part of this selected group.")
+            st.info("This two-domain view is Water + Biochemical without the conservative low-canopy-stature result.")
         else:
+            overlap = current_mask & S_supported
             c1, c2 = st.columns(2)
-            c1.metric("Highlighted trees also low stature", int((current_mask & low).sum()))
-            c2.metric("...with raster support", int((current_mask & low & cor).sum()))
-            st.caption("Structural agreement strengthens cross-domain corroboration but does not identify the causal stressor.")
+            c1.metric("Highlighted trees", int(current_mask.sum()))
+            c2.metric("Also low canopy stature", int(overlap.sum()))
+            st.caption("This is a cross-domain overlap check: it shows how often the selected spectral finding co-occurs with the conservative structural finding. It does not identify cause.")
 
         # ---------------------------------------------------------------------
         # 5. Advanced research analysis
@@ -1635,7 +1714,7 @@ with tab_methods:
     st.markdown("""
     **Water anomaly** — WBI is one direct block; NDMI2 + NDSI-RWC form one correlated SWIR block; PRI is additional support only.  
     **Biochemical anomaly** — NDRE + CI red-edge + REP form the chlorophyll/red-edge block; PSRI + SIPI form the pigment/senescence block; ARI1 is additional support.  
-    **Low canopy stature** — LAS H-P95 is primary; raster CHM P95 is an independent measurement check; H-IQR is context.  
+    **Low canopy stature** — shown only when LAS H-P95 and raster CHM P95 both satisfy their orchard-relative low-stature conditions. This is a conservative two-measurement structural rule.  
     **Cross-domain integration** — Water + Biochemical is shown as a two-domain combination, while Water + Biochemical + Low Canopy Stature is the three-domain combination. Raw indices are never counted as extra domains.
     """)
 
@@ -1652,13 +1731,14 @@ with tab_methods:
         ["Biochemical", "PSRI", f"≥ {BIO_THRESHOLDS['PSRI_HIGH_MIN']:.6f}", "Pigment / senescence"],
         ["Biochemical", "SIPI", f"≥ {BIO_THRESHOLDS['SIPI_HIGH_MIN']:.6f}", "Pigment / senescence"],
         ["Biochemical", "ARI1", f"≥ {BIO_THRESHOLDS['ARI1_HIGH_MIN']:.6f}", "Additional support only"],
-        ["Structure", "LAS H-P95", f"≤ {STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m", "Primary low-stature rule"],
-        ["Structure", "Raster CHM P95", f"≤ {STRUCTURE_THRESHOLDS['RASTER_CHM_P95_P25_M']:.3f} m", "Independent measurement support"],
+        ["Structure", "LAS H-P95", f"≤ {STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m", "Required structural condition"],
+        ["Structure", "Raster CHM P95", f"≤ {STRUCTURE_THRESHOLDS['RASTER_CHM_P95_P25_M']:.3f} m", "Required corroborating structural condition"],
     ]
     st.dataframe(pd.DataFrame(rows, columns=["Domain", "Indicator", "Operational condition", "Role"]), hide_index=True, use_container_width=True)
 
     st.subheader("Upstream quality control")
     st.write("Quality-control and missing-data checks remain active in the scientific processing chain, but the public map presents only supported findings that pass the finalized rule framework.")
+    st.info("For Structure, the public map deliberately uses the stricter LAS + raster agreement rule. This increases confidence in the displayed low-stature set but can exclude some genuine low-stature trees when the coarser raster does not agree; it is therefore a conservative supported-evidence view, not a complete census of every possible low tree.")
     st.info("The app is downstream of the finalized processing workflow. It does not rerun strip QC, index QC, SWIR consensus, or LAS processing.")
 
 
