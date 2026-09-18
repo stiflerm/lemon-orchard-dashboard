@@ -1,5 +1,5 @@
 """
-Orchard Diagnostic Intelligence v3 — Final Three-Domain Engine
+Orchard Diagnostic Intelligence v4 — User-Centred Three-Domain DSS
 ===============================================================
 
 Final deterministic domains
@@ -49,10 +49,22 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from shapely.geometry import Point
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.decomposition import PCA
+from sklearn.impute import SimpleImputer
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler
 from streamlit_folium import st_folium
+
+try:
+    from scipy.stats import mannwhitneyu, pearsonr
+    SCIPY_AVAILABLE = True
+except Exception:
+    SCIPY_AVAILABLE = False
 
 try:
     import google.generativeai as genai
@@ -67,7 +79,7 @@ warnings.filterwarnings("ignore")
 # 0. CONFIGURATION
 # =============================================================================
 
-APP_TITLE = "🍋 Orchard Diagnostic Intelligence — Three-Domain Engine"
+APP_TITLE = "🍋 Orchard Intelligence — Water • Biochemistry • Structure"
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 ZIP_PATH = DATA_DIR / "data.zip"
@@ -108,6 +120,54 @@ BIO_THRESHOLDS = {
     "SIPI_HIGH_MIN": 1.6044129002460532,
     "ARI1_HIGH_MIN": 4.409562434704582,
 }
+
+
+
+WATER_SENSITIVITY_THRESHOLDS = {
+    "P20": {
+        "WBI_LOW_MAX": 0.9732224384098488,
+        "PRI_LOW_MAX": -0.0905354641709804,
+        "NDMI2_HIGH_MIN": -0.1563689890814745,
+        "NDSI_RWC_LOW_MAX": 0.23842041377519282,
+    },
+    "P25": {
+        "WBI_LOW_MAX": 0.9780581745028392,
+        "PRI_LOW_MAX": -0.08910375378375263,
+        "NDMI2_HIGH_MIN": -0.17834779593229538,
+        "NDSI_RWC_LOW_MAX": 0.25159298573596856,
+    },
+    "P30": {
+        "WBI_LOW_MAX": 0.9835634253103394,
+        "PRI_LOW_MAX": -0.08797404072436948,
+        "NDMI2_HIGH_MIN": -0.19210124039554718,
+        "NDSI_RWC_LOW_MAX": 0.26483841514836876,
+    },
+}
+
+BIO_SENSITIVITY_THRESHOLDS = {
+    "P20": {"NDRE": 0.18991320677124718, "CIRED": 0.5020010800931471, "REP": 725.0965727700146,
+            "PSRI": 0.24515380157382927, "SIPI": 1.6691380599575552, "ARI1": 4.560504481288227},
+    "P25": {"NDRE": 0.2047129778647948, "CIRED": 0.5487572048699663, "REP": 725.3890241067692,
+            "PSRI": 0.2317542293068353, "SIPI": 1.6044129002460532, "ARI1": 4.409562434704582},
+    "P30": {"NDRE": 0.21786641970173387, "CIRED": 0.6123779812211838, "REP": 725.6065279573306,
+            "PSRI": 0.21685585761922752, "SIPI": 1.56515408797565, "ARI1": 4.274624848018448},
+}
+
+GROUND_SPECTRA_CANDIDATES = [
+    DATA_DIR / "ground_spectroradiometer.csv",
+    DATA_DIR / "SVC_ground_validation.csv",
+    DATA_DIR / "SVC_5spectra_analysis_ready.csv",
+    APP_DIR / "ground_spectroradiometer.csv",
+    APP_DIR / "SVC_ground_validation.csv",
+]
+
+WAVELENGTH_MAP_CANDIDATES = [
+    DATA_DIR / "band_wavelengths.csv",
+    DATA_DIR / "wavelength_mapping.csv",
+    DATA_DIR / "band_mapping_by_strip.csv",
+    APP_DIR / "band_wavelengths.csv",
+    APP_DIR / "wavelength_mapping.csv",
+]
 
 STRUCTURE_THRESHOLDS = {
     "H_P95_P20_M": 1.492920999526977,
@@ -468,108 +528,238 @@ def merge_geometry_and_rules(geometry: gpd.GeoDataFrame, rules: pd.DataFrame) ->
 # 4. FIELD NAVIGATION / KML
 # =============================================================================
 
-SCENARIO_COLORS = {
-    "OVERVIEW": "#CCCCCC",
-    "HIGH_MULTI_DOMAIN_PRIORITY": "#FF0000",
-    "MULTI_DOMAIN_PRIORITY": "#FF8C00",
-    "SINGLE_DOMAIN_PRIORITY": "#FFD700",
-    "SCREENING_PRIORITY": "#00BFFF",
-    "DATA_LIMITED_REVIEW": "#808080",
-    "NO_SUPPORTED_ANOMALY": "#2E8B57",
-    "WATER_SUPPORTED": "#1E90FF",
-    "BIOCHEMICAL_SUPPORTED": "#8A2BE2",
-    "STRUCTURE_LOW_STATURE": "#32CD32",
-    "WATER_BIOCHEMICAL_STRUCTURE": "#B22222",
-    "WATER_BIOCHEMICAL_ONLY": "#8B008B",
-    "WATER_STRUCTURE_ONLY": "#008080",
-    "BIOCHEMICAL_STRUCTURE_ONLY": "#D2691E",
-    "STRUCTURE_PROFILE": "#228B22",
-    "GAP_ANALYSIS": "#FFFFFF",
+# =============================================================================
+# 4. USER-CENTRED SCENARIOS / MAP HELPERS
+# =============================================================================
+
+VIEW_OPTIONS = {
+    "WATER": "💧 Water status",
+    "BIOCHEMICAL": "🧪 Canopy biochemical status",
+    "STRUCTURE": "🌳 Tree structure",
+    "COMBINED": "🔗 Combined multi-domain priority",
+    "SCREENING": "🔎 Screening / incomplete evidence",
+    "GAPS": "🍋 Planting-gap inventory",
 }
+
+VIEW_COLORS = {
+    "WATER": "#1E90FF",
+    "BIOCHEMICAL": "#9B59B6",
+    "STRUCTURE": "#2ECC71",
+    "COMBINED_3": "#E74C3C",
+    "COMBINED_2": "#F39C12",
+    "SCREENING": "#3498DB",
+    "DATA_LIMITED": "#95A5A6",
+    "GAPS": "#FFFFFF",
+}
+
+WATER_TOOLTIP = [
+    ("tree_id", "Tree ID"),
+    ("WATER_EVIDENCE_STATUS", "Water result"),
+    ("WBI_VALUE", "WBI"),
+    ("NDMI2_VALUE", "NDMI2"),
+    ("NDSI_RWC_VALUE", "NDSI-RWC"),
+    ("PRI_VALUE", "PRI support"),
+    ("WATER_MEASUREMENT_QUALITY", "Measurement quality"),
+]
+
+BIO_TOOLTIP = [
+    ("tree_id", "Tree ID"),
+    ("BIOCHEMICAL_STATUS", "Biochemical result"),
+    ("NDRE_VALUE", "NDRE"),
+    ("CIRED_EDGE_VALUE", "CI red-edge"),
+    ("REP_D1_NM_VALUE", "REP (nm)"),
+    ("PSRI_VALUE", "PSRI"),
+    ("SIPI_VALUE", "SIPI"),
+    ("ARI1_VALUE", "ARI1 support"),
+    ("NDVI_VALUE", "NDVI context"),
+]
+
+STRUCT_TOOLTIP = [
+    ("tree_id", "Tree ID"),
+    ("STRUCTURE_STATUS_FINAL", "Structure result"),
+    ("H_P95_m", "LAS H-P95 (m)"),
+    ("RASTER_CHM_P95_m", "Raster CHM P95 (m)"),
+    ("H_IQR_m", "Vertical variability (m)"),
+    ("STRUCTURE_EVIDENCE_STRENGTH", "Evidence strength"),
+]
+
+COMBINED_TOOLTIP = [
+    ("tree_id", "Tree ID"),
+    ("SUPPORTED_DOMAIN_COUNT", "Supported domains"),
+    ("CROSS_DOMAIN_PATTERN", "Cross-domain pattern"),
+    ("FIELD_INSPECTION_TIER", "Inspection priority"),
+    ("WATER_EVIDENCE_STATUS", "Water"),
+    ("BIOCHEMICAL_STATUS", "Biochemical"),
+    ("STRUCTURE_STATUS_FINAL", "Structure"),
+]
+
+
+def human_pattern(value):
+    mapping = {
+        "WATER_BIOCHEMICAL_STRUCTURE": "Water + biochemical + structure",
+        "WATER_BIOCHEMICAL_ONLY": "Water + biochemical",
+        "WATER_STRUCTURE_ONLY": "Water + structure",
+        "BIOCHEMICAL_STRUCTURE_ONLY": "Biochemical + structure",
+        "WATER_ONLY": "Water only",
+        "BIOCHEMICAL_ONLY": "Biochemical only",
+        "STRUCTURE_ONLY": "Structure only",
+        "NO_SUPPORTED_MAJOR_DOMAIN_ANOMALY": "No supported major-domain anomaly",
+    }
+    return mapping.get(str(value), str(value).replace("_", " ").title())
+
+
+def human_tier(value):
+    mapping = {
+        "HIGH_MULTI_DOMAIN_PRIORITY": "High multi-domain priority",
+        "MULTI_DOMAIN_PRIORITY": "Two-domain priority",
+        "SINGLE_DOMAIN_PRIORITY": "Single-domain priority",
+        "SCREENING_PRIORITY": "Screening priority",
+        "DATA_LIMITED_REVIEW": "Data-limited review",
+        "NO_SUPPORTED_ANOMALY": "No supported anomaly",
+    }
+    return mapping.get(str(value), str(value).replace("_", " ").title())
+
+
+def make_target_mask(gdf, view, include_screening=False, combined_mode="2+ domains", screening_mode="Screening evidence"):
+    if view == "WATER":
+        mask = as_bool(gdf["WATER_SUPPORTED"])
+        if include_screening and "WATER_SCREENING_ONLY" in gdf.columns:
+            mask |= as_bool(gdf["WATER_SCREENING_ONLY"])
+        return mask
+    if view == "BIOCHEMICAL":
+        mask = as_bool(gdf["BIOCHEMICAL_SUPPORTED"])
+        if include_screening and "BIOCHEMICAL_SCREENING_ONLY" in gdf.columns:
+            mask |= as_bool(gdf["BIOCHEMICAL_SCREENING_ONLY"])
+        return mask
+    if view == "STRUCTURE":
+        return as_bool(gdf["STRUCTURE_LOW_STATURE"])
+    if view == "COMBINED":
+        if combined_mode == "3 domains":
+            return pd.to_numeric(gdf["SUPPORTED_DOMAIN_COUNT"], errors="coerce").eq(3)
+        if combined_mode == "Exactly 2 domains":
+            return pd.to_numeric(gdf["SUPPORTED_DOMAIN_COUNT"], errors="coerce").eq(2)
+        return pd.to_numeric(gdf["SUPPORTED_DOMAIN_COUNT"], errors="coerce").ge(2)
+    if view == "SCREENING":
+        if screening_mode == "Data-limited review":
+            return gdf["FIELD_INSPECTION_TIER"].eq("DATA_LIMITED_REVIEW")
+        return gdf["FIELD_INSPECTION_TIER"].eq("SCREENING_PRIORITY")
+    return pd.Series(False, index=gdf.index)
+
+
+def tooltip_spec(view):
+    if view == "WATER":
+        return WATER_TOOLTIP
+    if view == "BIOCHEMICAL":
+        return BIO_TOOLTIP
+    if view == "STRUCTURE":
+        return STRUCT_TOOLTIP
+    return COMBINED_TOOLTIP
+
+
+def scenario_metrics(view):
+    if view == "WATER":
+        return ["WBI_VALUE", "NDMI2_VALUE", "NDSI_RWC_VALUE", "PRI_VALUE", "NDVI_VALUE"]
+    if view == "BIOCHEMICAL":
+        return ["NDRE_VALUE", "CIRED_EDGE_VALUE", "REP_D1_NM_VALUE", "PSRI_VALUE", "SIPI_VALUE", "ARI1_VALUE", "NDVI_VALUE"]
+    if view == "STRUCTURE":
+        return ["H_P95_m", "RASTER_CHM_P95_m", "H_IQR_m"]
+    return [
+        "WBI_VALUE", "NDMI2_VALUE", "NDSI_RWC_VALUE", "PRI_VALUE",
+        "NDRE_VALUE", "CIRED_EDGE_VALUE", "REP_D1_NM_VALUE", "PSRI_VALUE", "SIPI_VALUE", "ARI1_VALUE",
+        "NDVI_VALUE", "H_P95_m", "RASTER_CHM_P95_m", "H_IQR_m",
+    ]
+
+
+def add_target_layer(m, target_gdf, view):
+    if target_gdf.empty:
+        return
+    fields_aliases = [(f, a) for f, a in tooltip_spec(view) if f in target_gdf.columns]
+    fields = [x[0] for x in fields_aliases]
+    aliases = [x[1] + ":" for x in fields_aliases]
+    tooltip = folium.GeoJsonTooltip(fields=fields, aliases=aliases, localize=True, sticky=True)
+    popup = folium.GeoJsonPopup(fields=fields, aliases=aliases, localize=True, labels=True)
+
+    if view == "COMBINED":
+        def style_fn(feature):
+            n = feature.get("properties", {}).get("SUPPORTED_DOMAIN_COUNT", 0)
+            color = VIEW_COLORS["COMBINED_3"] if int(n or 0) == 3 else VIEW_COLORS["COMBINED_2"]
+            return {"fillColor": color, "color": "#FFFFFF", "weight": 2.2, "fillOpacity": 0.78}
+    elif view == "SCREENING":
+        def style_fn(feature):
+            tier = feature.get("properties", {}).get("FIELD_INSPECTION_TIER", "")
+            color = VIEW_COLORS["DATA_LIMITED"] if tier == "DATA_LIMITED_REVIEW" else VIEW_COLORS["SCREENING"]
+            return {"fillColor": color, "color": "#FFFFFF", "weight": 2.0, "fillOpacity": 0.72}
+    elif view == "STRUCTURE":
+        def style_fn(feature):
+            corroborated = str(feature.get("properties", {}).get("STRUCTURE_CORROBORATED", "False")).lower() in {"true", "1"}
+            color = VIEW_COLORS["STRUCTURE"] if corroborated else "#F1C40F"
+            return {"fillColor": color, "color": "#FFFFFF", "weight": 2.0, "fillOpacity": 0.75}
+    else:
+        color = VIEW_COLORS[view]
+        def style_fn(_):
+            return {"fillColor": color, "color": "#FFFFFF", "weight": 2.0, "fillOpacity": 0.75}
+
+    folium.GeoJson(
+        target_gdf,
+        style_function=style_fn,
+        tooltip=tooltip,
+        popup=popup,
+        name="Highlighted trees",
+    ).add_to(m)
 
 
 def make_navigation_points(source_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if source_gdf is None or source_gdf.empty:
         return gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
-
     work = source_gdf.copy()
-    if work.crs is None:
-        raise ValueError("Canopy layer has no CRS.")
-
     try:
         projected = work.to_crs(work.estimate_utm_crs()) if work.crs.is_geographic else work.copy()
         points = projected.copy()
         points.geometry = projected.geometry.centroid
-        points = points.to_crs(epsg=4326)
+        return points.to_crs(epsg=4326)
     except Exception:
-        points = work.to_crs(epsg=4326).copy()
-        points.geometry = points.geometry.representative_point()
-
-    points["Longitude"] = points.geometry.x
-    points["Latitude"] = points.geometry.y
-    return points
+        out = work.to_crs(epsg=4326).copy()
+        out.geometry = out.geometry.representative_point()
+        return out
 
 
 def build_tree_navigation_kml(source_gdf: gpd.GeoDataFrame, layer_title: str, color_hex="#FF0000") -> bytes:
     points = make_navigation_points(source_gdf)
     if points.empty:
         return b""
-
-    # KML uses AABBGGRR.
     h = color_hex.lstrip("#")
     rr, gg, bb = h[0:2], h[2:4], h[4:6]
     kml_color = f"ff{bb}{gg}{rr}"
-
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<kml xmlns="http://www.opengis.net/kml/2.2">',
-        '<Document>',
+        '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>',
         f'<name>{html.escape(layer_title)}</name>',
-        '<Style id="treeTarget"><IconStyle>',
-        f'<color>{kml_color}</color><scale>1.15</scale>',
+        '<Style id="treeTarget"><IconStyle>', f'<color>{kml_color}</color><scale>1.15</scale>',
         '<Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>',
         '</IconStyle></Style>',
     ]
-
-    detail_fields = [
-        "FIELD_INSPECTION_TIER", "CROSS_DOMAIN_PATTERN", "SUPPORTED_DOMAIN_COUNT",
-        "WATER_EVIDENCE_STATUS", "BIOCHEMICAL_STATUS", "STRUCTURE_STATUS_FINAL",
-        "WBI_VALUE", "NDMI2_VALUE", "NDSI_RWC_VALUE", "PRI_VALUE",
-        "NDRE_VALUE", "CIRED_EDGE_VALUE", "REP_D1_NM_VALUE", "PSRI_VALUE", "SIPI_VALUE", "ARI1_VALUE",
-        "H_P95_m", "RASTER_CHM_P95_m", "H_IQR_m",
-    ]
-
+    details = [x[0] for x in COMBINED_TOOLTIP] + [x[0] for x in WATER_TOOLTIP + BIO_TOOLTIP + STRUCT_TOOLTIP]
+    details = list(dict.fromkeys(details))
     for _, row in points.iterrows():
-        tree_id = row.get("tree_id", "NA")
-        desc = [
-            f"<b>Tree ID:</b> {html.escape(str(tree_id))}",
-            f"<b>Latitude:</b> {float(row['Latitude']):.7f}",
-            f"<b>Longitude:</b> {float(row['Longitude']):.7f}",
-        ]
-        for field in detail_fields:
+        rp = row.geometry
+        desc = [f"<b>Tree ID:</b> {html.escape(str(row.get('tree_id', 'NA')))}"]
+        for field in details:
             if field in row.index and pd.notna(row.get(field)):
                 value = row.get(field)
                 if isinstance(value, (float, np.floating)):
                     value = f"{float(value):.4f}"
                 desc.append(f"<b>{html.escape(field)}:</b> {html.escape(str(value))}")
-
-        parts.extend([
-            '<Placemark>',
-            f'<name>Tree {html.escape(str(tree_id))}</name>',
-            '<styleUrl>#treeTarget</styleUrl>',
-            f'<description><![CDATA[{"<br>".join(desc)}]]></description>',
-            '<Point>',
-            f'<coordinates>{float(row["Longitude"]):.8f},{float(row["Latitude"]):.8f},0</coordinates>',
-            '</Point>',
-            '</Placemark>',
-        ])
-
-    parts.extend(['</Document>', '</kml>'])
+        parts += [
+            '<Placemark>', f'<name>Tree {html.escape(str(row.get("tree_id", "NA")))}</name>',
+            '<styleUrl>#treeTarget</styleUrl>', f'<description><![CDATA[{"<br>".join(desc)}]]></description>',
+            f'<Point><coordinates>{rp.x:.8f},{rp.y:.8f},0</coordinates></Point>', '</Placemark>'
+        ]
+    parts.append('</Document></kml>')
     return "\n".join(parts).encode("utf-8")
 
 
 # =============================================================================
-# 5. GAP ANALYSIS — PRESERVED AS INVENTORY TOOL
+# 5. GAP ANALYSIS — INVENTORY ONLY
 # =============================================================================
 
 def calculate_gaps(gdf, expected_tree_spacing, row_distance_threshold, grid_angle_degrees, max_empty_space_m):
@@ -580,26 +770,21 @@ def calculate_gaps(gdf, expected_tree_spacing, row_distance_threshold, grid_angl
     raw_x = work["centroid"].apply(lambda p: p.x)
     raw_y = work["centroid"].apply(lambda p: p.y)
     mean_x, mean_y = raw_x.mean(), raw_y.mean()
-
     def rotate(x, y, angle_deg):
         rx = (x - mean_x) * math.cos(math.radians(angle_deg)) + (y - mean_y) * math.sin(math.radians(angle_deg))
         ry = -(x - mean_x) * math.sin(math.radians(angle_deg)) + (y - mean_y) * math.cos(math.radians(angle_deg))
         return rx, ry
-
     def unrotate(rx, ry, angle_deg):
         x = rx * math.cos(math.radians(angle_deg)) - ry * math.sin(math.radians(angle_deg))
         y = rx * math.sin(math.radians(angle_deg)) + ry * math.cos(math.radians(angle_deg))
         return x + mean_x, y + mean_y
-
     rotated = [rotate(x, y, grid_angle_degrees) for x, y in zip(raw_x, raw_y)]
     work["x"] = [c[0] for c in rotated]
     work["y"] = [c[1] for c in rotated]
-
     clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=row_distance_threshold, linkage="average")
     work["Row_ID"] = clustering.fit_predict(work[["y"]].to_numpy())
     row_centers = work.groupby("Row_ID")["y"].mean().to_dict()
     work["Row_Center_Y"] = work["Row_ID"].map(row_centers)
-
     gaps = []
     for _, group in work.groupby("Row_ID"):
         group = group.sort_values("x").reset_index(drop=True)
@@ -610,618 +795,684 @@ def calculate_gaps(gdf, expected_tree_spacing, row_distance_threshold, grid_angl
                 missing_count = int(np.round(dist / expected_tree_spacing)) - 1
                 for j in range(1, missing_count + 1):
                     gx = a["x"] + j * (dist / (missing_count + 1))
-                    real_x, real_y = unrotate(gx, a["Row_Center_Y"], grid_angle_degrees)
-                    gaps.append(Point(real_x, real_y))
-
+                    x, y = unrotate(gx, a["Row_Center_Y"], grid_angle_degrees)
+                    gaps.append(Point(x, y))
     gaps_gdf = gpd.GeoDataFrame({"geometry": gaps}, crs=work.crs)
     if len(gaps_gdf):
-        tree_buffers = work.geometry.buffer(2.0).unary_union
-        gaps_gdf = gaps_gdf[~gaps_gdf.intersects(tree_buffers)]
+        buffers = work.geometry.buffer(2.0).unary_union
+        gaps_gdf = gaps_gdf[~gaps_gdf.intersects(buffers)]
     gaps_wgs84 = gaps_gdf.to_crs(epsg=4326)
-
-    total_trees = len(work)
     total_gaps = len(gaps_wgs84)
-    ideal_capacity = total_trees + total_gaps
-    loss = (total_gaps / ideal_capacity) * 100 if ideal_capacity else 0.0
-    return gaps_wgs84, total_trees, total_gaps, loss
+    ideal = len(work) + total_gaps
+    return gaps_wgs84, len(work), total_gaps, (100 * total_gaps / ideal if ideal else 0.0)
 
 
 # =============================================================================
-# 6. SCENARIO FILTERS
+# 6. VALIDATION / ROBUSTNESS HELPERS
 # =============================================================================
 
-SCENARIOS = {
-    "OVERVIEW": (
-        "🧭 Orchard Overview",
-        "All 386 trees, colored only when a selected target layer is activated.",
-        "Use the Tree Inspector and summary panels to review all three domains without forcing a single diagnosis.",
-    ),
-    "HIGH_MULTI_DOMAIN_PRIORITY": (
-        "🔴 High Multi-Domain Priority",
-        "Water + Biochemical + Structure all show supported evidence.",
-        "Strongest internal cross-domain corroboration. It does not prove a causal chain or disease identity.",
-    ),
-    "MULTI_DOMAIN_PRIORITY": (
-        "🟠 Two-Domain Priority",
-        "Exactly two of the three major domains show supported evidence.",
-        "Useful for identifying paired physiological/biochemical/structural expressions without requiring all domains to agree.",
-    ),
-    "SINGLE_DOMAIN_PRIORITY": (
-        "🟡 Single-Domain Priority",
-        "Exactly one major domain shows supported evidence.",
-        "A single supported domain remains meaningful but lacks independent cross-domain corroboration.",
-    ),
-    "SCREENING_PRIORITY": (
-        "🔵 Screening Priority",
-        "Partial or isolated spectral evidence without a supported major-domain condition.",
-        "These trees are candidates for inspection, not supported multi-domain anomalies.",
-    ),
-    "DATA_LIMITED_REVIEW": (
-        "⚪ Data-Limited Review",
-        "No supported major-domain anomaly, but one or more domains are incomplete or inconclusive.",
-        "Missing evidence is never interpreted as normal.",
-    ),
-    "NO_SUPPORTED_ANOMALY": (
-        "🟢 No Supported Anomaly",
-        "Adequately assessed trees with no supported major-domain anomaly.",
-        "This does not mean confirmed healthy; it only means none of the finalized supported-evidence conditions were met.",
-    ),
-    "WATER_SUPPORTED": (
-        "💧 Supported Water-Status Anomaly",
-        "Water domain reaches the finalized supported-evidence condition.",
-        "WBI and the SWIR water block provide direct evidence; PRI can strengthen but does not independently create the supported class.",
-    ),
-    "BIOCHEMICAL_SUPPORTED": (
-        "🧪 Supported Biochemical Decline",
-        "Chlorophyll/red-edge and pigment/senescence sub-blocks agree.",
-        "NDRE + CIred-edge + REP and PSRI + SIPI are treated as related sub-blocks, not separate final domains. ARI1 is corroborative.",
-    ),
-    "STRUCTURE_LOW_STATURE": (
-        "🌳 Low Structural Stature",
-        "LAS H_P95 is below the orchard-relative operational P25 threshold.",
-        "Raster CHM P95 can corroborate the structural measurement. Structure describes relative stature, not a stress cause.",
-    ),
-    "WATER_BIOCHEMICAL_STRUCTURE": (
-        "🔴 Water + Biochemical + Structure",
-        "All three final domains coincide.",
-        "Highest cross-domain inspection priority in the current framework.",
-    ),
-    "WATER_BIOCHEMICAL_ONLY": (
-        "🟣 Water + Biochemical",
-        "Water and biochemical evidence agree without low-stature evidence.",
-        "Potentially consistent with a spectral/physiological response that has not expressed as low canopy stature.",
-    ),
-    "WATER_STRUCTURE_ONLY": (
-        "🟦 Water + Structure",
-        "Supported water anomaly coincides with low stature; biochemical decline is not supported.",
-        "Do not infer that water caused the structural condition without field evidence.",
-    ),
-    "BIOCHEMICAL_STRUCTURE_ONLY": (
-        "🟤 Biochemical + Structure",
-        "Supported biochemical decline coincides with low stature; water evidence is not supported.",
-        "Useful for separating structural/biochemical co-expression from a water-associated pattern.",
-    ),
-    "STRUCTURE_PROFILE": (
-        "🌲 Structural Profile",
-        "Trees with an assessable structural measurement.",
-        "H_P95 is primary; raster CHM P95 is measurement corroboration and H_IQR is context only.",
-    ),
-    "GAP_ANALYSIS": (
-        "🍋 Geometric Gap Analysis",
-        "Estimated missing planting positions from orchard-row geometry.",
-        "Inventory tool only; logically separate from health/anomaly classification.",
-    ),
-}
+def jaccard(a, b):
+    aa, bb = np.asarray(a, dtype=bool), np.asarray(b, dtype=bool)
+    union = np.logical_or(aa, bb).sum()
+    return np.logical_and(aa, bb).sum() / union if union else np.nan
 
 
-def scenario_mask(gdf, key):
-    if key == "OVERVIEW":
-        return pd.Series(True, index=gdf.index)
-    if key == "HIGH_MULTI_DOMAIN_PRIORITY":
-        return gdf["FIELD_INSPECTION_TIER"].eq("HIGH_MULTI_DOMAIN_PRIORITY")
-    if key == "MULTI_DOMAIN_PRIORITY":
-        return gdf["FIELD_INSPECTION_TIER"].eq("MULTI_DOMAIN_PRIORITY")
-    if key == "SINGLE_DOMAIN_PRIORITY":
-        return gdf["FIELD_INSPECTION_TIER"].eq("SINGLE_DOMAIN_PRIORITY")
-    if key == "SCREENING_PRIORITY":
-        return gdf["FIELD_INSPECTION_TIER"].eq("SCREENING_PRIORITY")
-    if key == "DATA_LIMITED_REVIEW":
-        return gdf["FIELD_INSPECTION_TIER"].eq("DATA_LIMITED_REVIEW")
-    if key == "NO_SUPPORTED_ANOMALY":
-        return gdf["FIELD_INSPECTION_TIER"].eq("NO_SUPPORTED_ANOMALY")
-    if key == "WATER_SUPPORTED":
-        return as_bool(gdf["WATER_SUPPORTED"])
-    if key == "BIOCHEMICAL_SUPPORTED":
-        return as_bool(gdf["BIOCHEMICAL_SUPPORTED"])
-    if key == "STRUCTURE_LOW_STATURE":
-        return as_bool(gdf["STRUCTURE_LOW_STATURE"])
-    if key in {"WATER_BIOCHEMICAL_STRUCTURE", "WATER_BIOCHEMICAL_ONLY", "WATER_STRUCTURE_ONLY", "BIOCHEMICAL_STRUCTURE_ONLY"}:
-        return gdf["CROSS_DOMAIN_PATTERN"].eq(key)
-    if key == "STRUCTURE_PROFILE":
-        return ~gdf["STRUCTURE_STATUS_FINAL"].eq("NOT_ASSESSABLE")
-    return pd.Series(False, index=gdf.index)
+def spectral_angle_deg(a, b):
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    mask = np.isfinite(a) & np.isfinite(b)
+    if mask.sum() < 2:
+        return np.nan
+    a, b = a[mask], b[mask]
+    den = np.linalg.norm(a) * np.linalg.norm(b)
+    if den <= 0:
+        return np.nan
+    return float(np.degrees(np.arccos(np.clip(np.dot(a, b) / den, -1, 1))))
+
+
+def spectral_rmse(a, b):
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    mask = np.isfinite(a) & np.isfinite(b)
+    return float(np.sqrt(np.mean((a[mask] - b[mask]) ** 2))) if mask.sum() else np.nan
+
+
+def rank_biserial_from_u(u, n1, n2):
+    return (2.0 * u) / (n1 * n2) - 1.0 if n1 and n2 else np.nan
+
+
+def sensitivity_domain_masks(df, scheme):
+    wt = WATER_SENSITIVITY_THRESHOLDS[scheme]
+    bt = BIO_SENSITIVITY_THRESHOLDS[scheme]
+    def num(c): return pd.to_numeric(df[c], errors="coerce") if c in df.columns else pd.Series(np.nan, index=df.index)
+    WBI, NDMI, NDSI = num("WBI_VALUE"), num("NDMI2_VALUE"), num("NDSI_RWC_VALUE")
+    water = WBI.notna() & NDMI.notna() & NDSI.notna() & (WBI <= wt["WBI_LOW_MAX"]) & (NDMI >= wt["NDMI2_HIGH_MIN"]) & (NDSI <= wt["NDSI_RWC_LOW_MAX"])
+    NDRE, CI, REP = num("NDRE_VALUE"), num("CIRED_EDGE_VALUE"), num("REP_D1_NM_VALUE")
+    PSRI, SIPI = num("PSRI_VALUE"), num("SIPI_VALUE")
+    bio = NDRE.notna() & CI.notna() & REP.notna() & PSRI.notna() & SIPI.notna() & (NDRE <= bt["NDRE"]) & (CI <= bt["CIRED"]) & (REP <= bt["REP"]) & (PSRI >= bt["PSRI"]) & (SIPI >= bt["SIPI"])
+    h95 = num("H_P95_m")
+    s_thr = {"P20": STRUCTURE_THRESHOLDS["H_P95_P20_M"], "P25": STRUCTURE_THRESHOLDS["H_P95_P25_M"], "P30": STRUCTURE_THRESHOLDS["H_P95_P30_M"]}[scheme]
+    structure = h95.notna() & (h95 <= s_thr)
+    return water.fillna(False), bio.fillna(False), structure.fillna(False)
+
+
+def sensitivity_target_mask(df, view, scheme, combined_mode="2+ domains"):
+    W, B, S = sensitivity_domain_masks(df, scheme)
+    if view == "WATER": return W
+    if view == "BIOCHEMICAL": return B
+    if view == "STRUCTURE": return S
+    if view == "COMBINED":
+        count = W.astype(int) + B.astype(int) + S.astype(int)
+        if combined_mode == "3 domains": return count.eq(3)
+        if combined_mode == "Exactly 2 domains": return count.eq(2)
+        return count.ge(2)
+    return pd.Series(False, index=df.index)
+
+
+def comparison_statistics(df, target_mask, reference_mask, metrics):
+    rows = []
+    for c in metrics:
+        if c not in df.columns: continue
+        x = pd.to_numeric(df.loc[target_mask, c], errors="coerce").dropna().to_numpy(float)
+        y = pd.to_numeric(df.loc[reference_mask, c], errors="coerce").dropna().to_numpy(float)
+        if not len(x) or not len(y): continue
+        row = {"Metric": c, "Target n": len(x), "Reference n": len(y), "Target median": np.median(x), "Reference median": np.median(y), "Median difference": np.median(x)-np.median(y)}
+        if SCIPY_AVAILABLE:
+            try:
+                u, p = mannwhitneyu(x, y, alternative="two-sided")
+                row["Mann–Whitney p"] = p
+                row["Rank-biserial"] = rank_biserial_from_u(u, len(x), len(y))
+            except Exception:
+                pass
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def pca_feature_space(df, features, target_mask, reference_mask):
+    available = [c for c in features if c in df.columns and pd.to_numeric(df[c], errors="coerce").notna().sum() >= 3]
+    if len(available) < 3: return pd.DataFrame(), None, []
+    X = df[available].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    X = SimpleImputer(strategy="median").fit_transform(X)
+    X = StandardScaler().fit_transform(X)
+    pca = PCA(n_components=2)
+    pcs = pca.fit_transform(X)
+    group = np.where(target_mask, "Highlighted", np.where(reference_mask, "Internal reference", "Other"))
+    out = pd.DataFrame({"PC1": pcs[:,0], "PC2": pcs[:,1], "Group": group, "tree_id": df["tree_id"].values})
+    return out, pca.explained_variance_ratio_*100, available
+
+
+def morans_i_knn(gdf, target_mask, k=4, permutations=199, seed=42):
+    y = np.asarray(target_mask, dtype=int)
+    prevalence = y.mean() if len(y) else np.nan
+    if len(y) < max(5, k+1) or prevalence in (0,1): return np.nan, np.nan, prevalence, np.nan
+    try:
+        projected = gdf.to_crs(gdf.estimate_utm_crs())
+        cent = projected.geometry.centroid
+        coords = np.c_[cent.x, cent.y]
+    except Exception:
+        return np.nan, np.nan, prevalence, np.nan
+    n = len(y); k_eff=min(k,n-1)
+    neigh=NearestNeighbors(n_neighbors=k_eff+1).fit(coords).kneighbors(return_distance=False)[:,1:]
+    def calc(vals):
+        z=vals-vals.mean(); den=np.sum(z*z)
+        if den==0: return np.nan
+        return sum(np.mean(z[i]*z[neigh[i]]) for i in range(n))/den
+    obs=calc(y.astype(float))
+    idx=np.where(y==1)[0]
+    nbr=float(np.mean([y[neigh[i]].mean() for i in idx])) if len(idx) else np.nan
+    lift=nbr/prevalence if prevalence else np.nan
+    rng=np.random.default_rng(seed)
+    perms=np.asarray([calc(rng.permutation(y).astype(float)) for _ in range(permutations)])
+    p=(np.sum(np.abs(perms)>=abs(obs))+1)/(len(perms)+1)
+    return obs,p,prevalence,lift
+
+
+def load_wavelength_map():
+    path = first_existing(WAVELENGTH_MAP_CANDIDATES)
+    if path is None: return {}, None
+    try:
+        d=pd.read_csv(path)
+        cols={c.lower():c for c in d.columns}
+        wave=next((c for k,c in cols.items() if "wavelength" in k),None)
+        band=next((c for k,c in cols.items() if k in {"band","band_name","band_col","column"}),None)
+        if wave and band:
+            return {str(r[band]):float(r[wave]) for _,r in d.dropna(subset=[wave]).iterrows()}, path.name
+    except Exception:
+        pass
+    return {}, path.name
+
+
+def ground_wide_to_long(df):
+    id_col = "tree_id" if "tree_id" in df.columns else ("spectrum_id" if "spectrum_id" in df.columns else None)
+    if id_col is None: return pd.DataFrame(), None
+    rows=[]
+    for c in df.columns:
+        if c == id_col: continue
+        m=re.search(r"(\d{3,4}(?:\.\d+)?)", str(c))
+        if not m: continue
+        wl=float(m.group(1))
+        vals=pd.to_numeric(df[c], errors="coerce")
+        for idx,v in vals.items():
+            if pd.notna(v): rows.append({id_col:df.loc[idx,id_col],"wavelength_nm":wl,"reflectance":float(v)})
+    return pd.DataFrame(rows), id_col
+
+
+def normalize_ground_long(df):
+    cols={c.lower():c for c in df.columns}
+    wave=next((c for k,c in cols.items() if k in {"wavelength_nm","wavelength","nm"} or "wavelength" in k),None)
+    refl=next((c for k,c in cols.items() if k in {"reflectance","refl","value"} or "reflectance" in k),None)
+    id_col="tree_id" if "tree_id" in df.columns else ("spectrum_id" if "spectrum_id" in df.columns else None)
+    if wave and refl and id_col:
+        out=df[[id_col,wave,refl]].rename(columns={wave:"wavelength_nm",refl:"reflectance"}).copy()
+        out["wavelength_nm"]=pd.to_numeric(out["wavelength_nm"],errors="coerce")
+        out["reflectance"]=pd.to_numeric(out["reflectance"],errors="coerce")
+        return out.dropna(),id_col
+    return ground_wide_to_long(df)
+
+
+def spectrum_value(group, target_nm, tol=6.0):
+    if group.empty: return np.nan
+    w=group["wavelength_nm"].to_numpy(float); r=group["reflectance"].to_numpy(float)
+    i=int(np.argmin(np.abs(w-target_nm)))
+    return float(r[i]) if abs(w[i]-target_nm)<=tol else np.nan
+
+
+def compute_ground_indices(long_df, id_col, reflectance_scale="Auto"):
+    if long_df.empty: return pd.DataFrame()
+    d=long_df.copy()
+    if reflectance_scale == "Percent (0–100)": d["reflectance"]=d["reflectance"]/100.0
+    elif reflectance_scale == "Auto":
+        med=np.nanmedian(d["reflectance"].to_numpy(float))
+        if np.isfinite(med) and med>2: d["reflectance"]=d["reflectance"]/100.0
+    rows=[]
+    for sid,g in d.groupby(id_col):
+        R=lambda x:spectrum_value(g,x)
+        vals={x:R(x) for x in [445,500,531,550,570,670,680,700,705,750,800,900,970,1100,1222,2200,2264]}
+        def sd(a,b): return (a-b)/(a+b) if np.isfinite(a) and np.isfinite(b) and abs(a+b)>1e-12 else np.nan
+        row={id_col:sid}
+        row.update({
+            "GROUND_NDVI":sd(vals[800],vals[670]),
+            "GROUND_NDRE":sd(vals[750],vals[705]),
+            "GROUND_CIRED_EDGE":(vals[750]/vals[705]-1) if np.isfinite(vals[750]) and np.isfinite(vals[705]) and abs(vals[705])>1e-12 else np.nan,
+            "GROUND_WBI":(vals[900]/vals[970]) if np.isfinite(vals[900]) and np.isfinite(vals[970]) and abs(vals[970])>1e-12 else np.nan,
+            "GROUND_PRI":sd(vals[531],vals[570]),
+            "GROUND_PSRI":((vals[680]-vals[500])/vals[750]) if np.isfinite(vals[680]) and np.isfinite(vals[500]) and np.isfinite(vals[750]) and abs(vals[750])>1e-12 else np.nan,
+            "GROUND_SIPI":((vals[800]-vals[445])/(vals[800]-vals[680])) if np.isfinite(vals[800]) and np.isfinite(vals[445]) and np.isfinite(vals[680]) and abs(vals[800]-vals[680])>1e-12 else np.nan,
+            "GROUND_ARI1":(1/vals[550]-1/vals[700]) if np.isfinite(vals[550]) and np.isfinite(vals[700]) and vals[550]!=0 and vals[700]!=0 else np.nan,
+            "GROUND_NDMI2":sd(vals[2200],vals[1100]),
+            "GROUND_NDSI_RWC":sd(vals[1222],vals[2264]),
+        })
+        # REP from maximum positive derivative 680–750 nm
+        gg=g[(g["wavelength_nm"]>=680)&(g["wavelength_nm"]<=750)].sort_values("wavelength_nm")
+        if len(gg)>=3:
+            w=gg["wavelength_nm"].to_numpy(float); r=gg["reflectance"].to_numpy(float)
+            der=np.gradient(r,w); row["GROUND_REP_D1_NM"]=float(w[np.nanargmax(der)])
+        else: row["GROUND_REP_D1_NM"]=np.nan
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 # =============================================================================
-# 7. APP LOAD
+# 7. SIMPLE VISUAL HELPERS
 # =============================================================================
 
-st.set_page_config(page_title="Orchard Three-Domain Engine", layout="wide")
+def status_card(title, value, subtitle, icon=""):
+    st.markdown(
+        f"""<div style='padding:1rem;border:1px solid rgba(128,128,128,.35);border-radius:14px;height:145px;'>
+        <div style='font-size:1.1rem;font-weight:700'>{icon} {html.escape(str(title))}</div>
+        <div style='font-size:2rem;font-weight:800;margin:.35rem 0'>{html.escape(str(value))}</div>
+        <div style='opacity:.75;font-size:.9rem'>{html.escape(str(subtitle))}</div>
+        </div>""", unsafe_allow_html=True
+    )
+
+
+def indicator_histogram(df, column, threshold=None, direction=None, title=None):
+    if column not in df.columns: return None
+    s=pd.to_numeric(df[column],errors="coerce").dropna()
+    if s.empty: return None
+    fig=px.histogram(x=s, nbins=28, labels={"x":column,"y":"Trees"}, title=title or column)
+    if threshold is not None and np.isfinite(threshold):
+        fig.add_vline(x=threshold,line_dash="dash",annotation_text=f"Operational threshold {threshold:.3f}")
+    fig.update_layout(height=310,margin=dict(l=10,r=10,t=50,b=10),showlegend=False)
+    return fig
+
+
+# =============================================================================
+# 8. APP LOAD / CONTROLS
+# =============================================================================
+
+st.set_page_config(page_title="Orchard Three-Domain DSS", layout="wide")
 st.title(APP_TITLE)
-st.caption(
-    "Final tree-level decision support using Water + Biochemical + Structure. "
-    "Outputs are inspection priorities/anomaly evidence, not confirmed disease diagnoses."
-)
+st.caption("Choose a physiological/structural question, see the affected trees on the map, and hover/click a crown to see the evidence used. The system is a screening and field-prioritization tool, not a disease diagnosis.")
 
 geometry_gdf = load_tree_geometry()
 rule_df, rule_source = load_final_rule_database()
 spectral_df = load_spectral_data()
-
 try:
     gdf = merge_geometry_and_rules(geometry_gdf, rule_df)
 except Exception as exc:
-    st.error(f"Could not align geometry and final rule database: {exc}")
+    st.error(f"Could not align canopy geometry and final database: {exc}")
     st.stop()
 
-# Core dataset validation: freeze expected 386-tree implementation when applicable.
-if len(gdf) == 386:
-    observed = gdf["SUPPORTED_DOMAIN_COUNT"].value_counts().sort_index().to_dict()
-    expected = {0: 259, 1: 90, 2: 27, 3: 10}
-    if observed != expected:
-        st.warning(f"Three-domain count check differs from finalized dataset. Expected {expected}; observed {observed}.")
+st.sidebar.header("What do you want to inspect?")
+view = st.sidebar.radio("Choose a scenario", options=list(VIEW_OPTIONS), format_func=lambda k: VIEW_OPTIONS[k], label_visibility="collapsed")
+st.sidebar.caption("The map highlights only trees meeting the selected rule. Hover a highlighted crown for the measurements used.")
 
-st.sidebar.header("Three-Domain Controls")
-st.sidebar.caption(rule_source)
-selected_scenario = st.sidebar.selectbox(
-    "Map / inspection layer",
-    options=list(SCENARIOS.keys()),
-    format_func=lambda x: SCENARIOS[x][0],
-)
+include_screening=False
+combined_mode="2+ domains"
+screening_mode="Screening evidence"
+if view in {"WATER","BIOCHEMICAL"}:
+    include_screening=st.sidebar.checkbox("Also show weaker screening-level cases", value=False)
+if view=="COMBINED":
+    combined_mode=st.sidebar.selectbox("Combined view", ["2+ domains","3 domains","Exactly 2 domains"])
+if view=="SCREENING":
+    screening_mode=st.sidebar.selectbox("Review layer", ["Screening evidence","Data-limited review"])
 
-if selected_scenario == "GAP_ANALYSIS":
-    with st.sidebar.expander("Gap-analysis parameters", expanded=False):
-        expected_tree_spacing = st.number_input("Expected tree spacing (m)", 0.5, 20.0, DEFAULT_TREE_SPACING_M, 0.1)
-        row_distance_threshold = st.number_input("Row clustering threshold (m)", 0.5, 10.0, DEFAULT_ROW_DISTANCE_THRESHOLD_M, 0.1)
-        grid_angle_degrees = st.number_input("Grid rotation angle (deg)", -180.0, 180.0, DEFAULT_GRID_ANGLE_DEG, 1.0)
-        max_empty_space_m = st.number_input("Maximum gap considered (m)", 2.0, 100.0, DEFAULT_MAX_EMPTY_SPACE_M, 1.0)
-    gaps_gdf, total_trees, total_gaps, yield_loss_percentage = calculate_gaps(
-        gdf, expected_tree_spacing, row_distance_threshold, grid_angle_degrees, max_empty_space_m
-    )
-    target_gdf = gdf.iloc[0:0].copy()
+if view=="GAPS":
+    with st.sidebar.expander("Planting-gap settings", expanded=False):
+        expected_tree_spacing=st.number_input("Expected tree spacing (m)",0.5,20.0,DEFAULT_TREE_SPACING_M,0.1)
+        row_distance_threshold=st.number_input("Row clustering threshold (m)",0.5,10.0,DEFAULT_ROW_DISTANCE_THRESHOLD_M,0.1)
+        grid_angle_degrees=st.number_input("Grid rotation angle (deg)",-180.0,180.0,DEFAULT_GRID_ANGLE_DEG,1.0)
+        max_empty_space_m=st.number_input("Maximum gap considered (m)",2.0,100.0,DEFAULT_MAX_EMPTY_SPACE_M,1.0)
+    gaps_gdf,total_trees,total_gaps,yield_loss_percentage=calculate_gaps(gdf,expected_tree_spacing,row_distance_threshold,grid_angle_degrees,max_empty_space_m)
+    target_mask=pd.Series(False,index=gdf.index); target_gdf=gdf.iloc[0:0].copy()
 else:
-    gaps_gdf = gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
-    total_trees = len(gdf)
-    mask = scenario_mask(gdf, selected_scenario)
-    target_gdf = gdf[mask].copy()
-
-
-# =============================================================================
-# 8. TREE INSPECTOR
-# =============================================================================
+    gaps_gdf=gpd.GeoDataFrame(columns=["geometry"],geometry="geometry",crs="EPSG:4326")
+    target_mask=make_target_mask(gdf,view,include_screening,combined_mode,screening_mode)
+    target_gdf=gdf[target_mask].copy()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Tree Inspector")
-all_tree_ids = sorted(gdf["tree_id"].tolist())
-selected_tree_id = st.sidebar.selectbox("Tree ID", all_tree_ids)
-selected_tree = gdf.loc[gdf["tree_id"] == selected_tree_id].iloc[0]
-
-with st.sidebar.expander("Selected tree — final evidence", expanded=True):
-    st.write(f"**Inspection tier:** {selected_tree.get('FIELD_INSPECTION_TIER', 'NA')}")
-    st.write(f"**Cross-domain pattern:** {selected_tree.get('CROSS_DOMAIN_PATTERN', 'NA')}")
-    st.write(f"**Supported domains:** {selected_tree.get('SUPPORTED_DOMAIN_COUNT', 'NA')}/3")
-    st.write(f"**Assessment completeness:** {selected_tree.get('MULTIDOMAIN_COMPLETENESS', 'NA')}")
-    st.markdown("**Water**")
-    st.write(selected_tree.get("WATER_EVIDENCE_STATUS", "NA"))
-    st.markdown("**Biochemical**")
-    st.write(selected_tree.get("BIOCHEMICAL_STATUS", "NA"))
-    st.markdown("**Structure**")
-    st.write(selected_tree.get("STRUCTURE_STATUS_FINAL", "NA"))
-    if pd.notna(selected_tree.get("CROSS_DOMAIN_INTERPRETATION", np.nan)):
-        st.caption(str(selected_tree.get("CROSS_DOMAIN_INTERPRETATION")))
+st.sidebar.caption(rule_source)
+st.sidebar.metric("Highlighted trees", len(target_gdf) if view!="GAPS" else len(gaps_gdf))
+if view!="GAPS":
+    st.sidebar.caption(f"{100*len(target_gdf)/len(gdf):.1f}% of {len(gdf)} orchard trees")
 
 
 # =============================================================================
 # 9. MAIN TABS
 # =============================================================================
 
-tab_map, tab_tree, tab_summary, tab_methods = st.tabs([
-    "🗺️ Three-Domain Map",
-    "🌳 Tree Evidence",
+tab_map, tab_evidence, tab_summary, tab_validation, tab_methods = st.tabs([
+    "🗺️ Map & Scenarios",
+    "🧭 Evidence Explained",
     "📊 Orchard Summary",
-    "🧪 Rules / Methods",
+    "🧪 Validation & Robustness",
+    "📘 Methods",
 ])
 
-
-# -----------------------------------------------------------------------------
-# TAB 1 — MAP
-# -----------------------------------------------------------------------------
 with tab_map:
-    col_map, col_detail = st.columns([3, 2])
+    if view=="WATER":
+        st.header("💧 Water-status screening")
+        st.write("Highlighted trees meet the finalized water rule. Hover a tree to see WBI, SWIR water indices and PRI support.")
+    elif view=="BIOCHEMICAL":
+        st.header("🧪 Canopy biochemical screening")
+        st.write("Highlighted trees have concordant chlorophyll/red-edge and pigment/senescence evidence.")
+    elif view=="STRUCTURE":
+        st.header("🌳 Structural stature")
+        st.write("Highlighted trees have orchard-relative low LAS H-P95. Green = raster-corroborated; yellow = LAS-only.")
+    elif view=="COMBINED":
+        st.header("🔗 Cross-domain priority")
+        st.write("Red = all three domains; orange = exactly two domains. Agreement increases inspection priority, not causal certainty.")
+    elif view=="SCREENING":
+        st.header("🔎 Screening / incomplete evidence")
+        st.write("These trees do not meet a supported major-domain rule but still deserve review because evidence is partial, discordant or incomplete.")
+    else:
+        st.header("🍋 Planting-gap inventory")
 
-    with col_map:
-        show_canopies = st.checkbox("Show all canopy outlines", value=True)
+    if view!="GAPS":
+        c1,c2,c3=st.columns(3)
+        c1.metric("Highlighted",len(target_gdf))
+        c2.metric("Share of orchard",f"{100*len(target_gdf)/len(gdf):.1f}%")
+        if view=="COMBINED": c3.metric("3-domain trees",int((gdf["SUPPORTED_DOMAIN_COUNT"]==3).sum()))
+        else: c3.metric("Total trees",len(gdf))
 
-        map_center = [gdf.geometry.centroid.y.mean(), gdf.geometry.centroid.x.mean()]
-        m = folium.Map(location=map_center, zoom_start=18, max_zoom=22, tiles="CartoDB dark_matter")
+    center=[gdf.geometry.centroid.y.mean(),gdf.geometry.centroid.x.mean()]
+    m=folium.Map(location=center,zoom_start=18,max_zoom=22,tiles="CartoDB positron")
+    folium.GeoJson(gdf,style_function=lambda _:{"fillColor":"#D0D0D0","color":"#777777","weight":0.7,"fillOpacity":0.05},name="All tree crowns").add_to(m)
+    if view=="GAPS":
+        for _,row in gaps_gdf.iterrows():
+            folium.CircleMarker([row.geometry.y,row.geometry.x],radius=5,color="#C0392B",fill=True,fill_opacity=.9,tooltip="Calculated planting gap").add_to(m)
+    else:
+        add_target_layer(m,target_gdf,view)
+    folium.LayerControl(collapsed=True).add_to(m)
+    map_event=st_folium(m,height=650,use_container_width=True)
+    st.caption("Hover = quick evidence. Click = persistent popup with the same evidence. No Tree-ID selection is required.")
 
-        # No CHM GeoTIFF is required. The structural domain has already been
-        # quantified upstream and is carried tree-by-tree in the final database
-        # (LAS H_P95, raster-derived CHM P95 cross-check, H_IQR, QC/status).
-        if show_canopies:
-            folium.GeoJson(
-                gdf,
-                style_function=lambda _: {"fillColor": "none", "color": "#00FFCC", "weight": 0.8, "fillOpacity": 0.0},
-                name="All tree crowns",
-            ).add_to(m)
+    if view!="GAPS" and not target_gdf.empty:
+        col1,col2=st.columns(2)
+        with col1:
+            st.download_button("Download highlighted trees (GeoJSON)",target_gdf.to_json(),file_name=f"{view.lower()}_targets.geojson",mime="application/geo+json")
+        with col2:
+            color = VIEW_COLORS.get(view, VIEW_COLORS["COMBINED_2"])
+            kml=build_tree_navigation_kml(target_gdf,f"{VIEW_OPTIONS[view]} targets",color)
+            st.download_button("📍 Download highlighted trees (KML)",kml,file_name=f"{view.lower()}_targets.kml",mime="application/vnd.google-earth.kml+xml")
+    elif view=="GAPS" and len(gaps_gdf):
+        st.metric("Calculated gaps",total_gaps)
+        st.metric("Estimated planting-capacity gap",f"{yield_loss_percentage:.1f}%")
 
-        # Selected tree is always highlighted.
-        selected_geom = gdf[gdf["tree_id"] == selected_tree_id]
-        folium.GeoJson(
-            selected_geom,
-            style_function=lambda _: {"fillColor": "#FFFFFF", "color": "#FFFFFF", "weight": 3.0, "fillOpacity": 0.25},
-            tooltip=folium.GeoJsonTooltip(fields=["tree_id"], aliases=["Selected Tree ID:"]),
-            name="Selected tree",
-        ).add_to(m)
+with tab_evidence:
+    st.header("What the highlighted trees mean")
+    if view=="WATER":
+        cols=st.columns(3)
+        with cols[0]: status_card("Direct VNIR water evidence","WBI","Low WBI contributes one direct water block","💧")
+        with cols[1]: status_card("SWIR water evidence","NDMI2 + NDSI-RWC","These two correlated indices count as ONE block","🌊")
+        with cols[2]: status_card("Physiology support","PRI","Corroborates but cannot create the supported water class alone","⚡")
+        st.info("Supported water anomaly = abnormal WBI AND concordant SWIR block. PRI can strengthen the internal evidence.")
+        charts=st.columns(2)
+        with charts[0]:
+            fig=indicator_histogram(gdf,"WBI_VALUE",WATER_SENSITIVITY_THRESHOLDS["P25"]["WBI_LOW_MAX"],title="WBI across orchard")
+            if fig: st.plotly_chart(fig,use_container_width=True)
+        with charts[1]:
+            fig=indicator_histogram(gdf,"NDMI2_VALUE",WATER_SENSITIVITY_THRESHOLDS["P25"]["NDMI2_HIGH_MIN"],title="NDMI2 across orchard")
+            if fig: st.plotly_chart(fig,use_container_width=True)
+        supported=as_bool(gdf["WATER_SUPPORTED"])
+        x1,x2,x3=st.columns(3)
+        x1.metric("Supported water trees",int(supported.sum()))
+        x2.metric("Also biochemical",int((supported & as_bool(gdf["BIOCHEMICAL_SUPPORTED"])).sum()))
+        x3.metric("Also low stature",int((supported & as_bool(gdf["STRUCTURE_LOW_STATURE"])).sum()))
+    elif view=="BIOCHEMICAL":
+        cols=st.columns(3)
+        with cols[0]: status_card("Chlorophyll / red-edge block","NDRE + CIred + REP","All three must support the same direction","🍃")
+        with cols[1]: status_card("Pigment / senescence block","PSRI + SIPI","Both must support the pigment response","🧪")
+        with cols[2]: status_card("Additional support","ARI1","Strengthens concordant biochemical decline; NDVI is context","🔬")
+        st.info("A supported biochemical domain requires BOTH the chlorophyll/red-edge block and the pigment/senescence block.")
+        charts=st.columns(2)
+        with charts[0]:
+            fig=indicator_histogram(gdf,"NDRE_VALUE",BIO_THRESHOLDS["NDRE_LOW_MAX"],title="NDRE across orchard")
+            if fig: st.plotly_chart(fig,use_container_width=True)
+        with charts[1]:
+            fig=indicator_histogram(gdf,"PSRI_VALUE",BIO_THRESHOLDS["PSRI_HIGH_MIN"],title="PSRI across orchard")
+            if fig: st.plotly_chart(fig,use_container_width=True)
+        supported=as_bool(gdf["BIOCHEMICAL_SUPPORTED"])
+        x1,x2,x3=st.columns(3)
+        x1.metric("Supported biochemical trees",int(supported.sum()))
+        x2.metric("Also water",int((supported & as_bool(gdf["WATER_SUPPORTED"])).sum()))
+        x3.metric("Also low stature",int((supported & as_bool(gdf["STRUCTURE_LOW_STATURE"])).sum()))
+    elif view=="STRUCTURE":
+        cols=st.columns(3)
+        with cols[0]: status_card("Primary stature","LAS H-P95",f"Low stature ≤ {STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m","🌳")
+        with cols[1]: status_card("Independent measurement check","Raster CHM P95",f"Corroboration threshold ≤ {STRUCTURE_THRESHOLDS['RASTER_CHM_P95_P25_M']:.3f} m","🛰️")
+        with cols[2]: status_card("Canopy complexity context","H-IQR","Shown for context; not a stress vote","📐")
+        fig=indicator_histogram(gdf,"H_P95_m",STRUCTURE_THRESHOLDS["H_P95_P25_M"],title="LAS H-P95 across orchard")
+        if fig: st.plotly_chart(fig,use_container_width=True)
+        s=as_bool(gdf["STRUCTURE_LOW_STATURE"]); cor=as_bool(gdf["STRUCTURE_CORROBORATED"])
+        x1,x2,x3=st.columns(3)
+        x1.metric("Low-stature trees",int(s.sum()))
+        x2.metric("Raster-corroborated",int((s&cor).sum()))
+        x3.metric("LAS-only",int((s&~cor).sum()))
+        st.warning("Low stature describes relative canopy size, not a proven cause or disease.")
+    elif view=="COMBINED":
+        c1,c2,c3=st.columns(3)
+        c1.metric("All 3 domains",int((gdf["SUPPORTED_DOMAIN_COUNT"]==3).sum()))
+        c2.metric("Exactly 2 domains",int((gdf["SUPPORTED_DOMAIN_COUNT"]==2).sum()))
+        c3.metric("Exactly 1 domain",int((gdf["SUPPORTED_DOMAIN_COUNT"]==1).sum()))
+        patt=gdf["CROSS_DOMAIN_PATTERN"].map(human_pattern).value_counts().reset_index()
+        patt.columns=["Pattern","Trees"]
+        fig=px.bar(patt,x="Trees",y="Pattern",orientation="h",title="How the three domains combine")
+        fig.update_layout(height=430,margin=dict(l=10,r=10,t=50,b=10),yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig,use_container_width=True)
+        st.info("Water, biochemical and structure are evaluated independently first. Their agreement strengthens inspection priority but does not prove a causal chain.")
+    elif view=="SCREENING":
+        tier=gdf["FIELD_INSPECTION_TIER"].map(human_tier).value_counts().reset_index(); tier.columns=["Review category","Trees"]
+        fig=px.bar(tier,x="Review category",y="Trees",title="Why some trees are not placed in a supported domain")
+        st.plotly_chart(fig,use_container_width=True)
+        st.info("Screening priority = partial evidence. Data-limited review = missing/inconclusive evidence. Neither category should be called normal.")
+    else:
+        st.info("Gap analysis is an orchard inventory function and is intentionally separate from the physiological/structural rule engine.")
 
-        if selected_scenario == "GAP_ANALYSIS":
-            for _, row in gaps_gdf.iterrows():
-                folium.CircleMarker(
-                    location=[row.geometry.y, row.geometry.x], radius=5, color="#000000", weight=2,
-                    fill=True, fill_color="#FFFFFF", fill_opacity=1.0, tooltip="Calculated planting gap"
-                ).add_to(m)
-        elif selected_scenario != "OVERVIEW" and not target_gdf.empty:
-            tooltip_candidates = [
-                "tree_id", "FIELD_INSPECTION_TIER", "CROSS_DOMAIN_PATTERN", "SUPPORTED_DOMAIN_COUNT",
-                "WATER_EVIDENCE_STATUS", "BIOCHEMICAL_STATUS", "STRUCTURE_STATUS_FINAL",
-                "WBI_VALUE", "NDMI2_VALUE", "NDSI_RWC_VALUE", "PRI_VALUE",
-                "NDRE_VALUE", "CIRED_EDGE_VALUE", "REP_D1_NM_VALUE", "PSRI_VALUE", "SIPI_VALUE", "ARI1_VALUE",
-                "H_P95_m", "RASTER_CHM_P95_m",
-            ]
-            fields = [f for f in tooltip_candidates if f in target_gdf.columns]
-            tooltip = folium.GeoJsonTooltip(fields=fields, aliases=[f"{f}:" for f in fields], localize=True)
-            color = SCENARIO_COLORS.get(selected_scenario, "#FF0000")
-            folium.GeoJson(
-                target_gdf,
-                style_function=lambda _, c=color: {"fillColor": c, "color": "white", "weight": 2.0, "fillOpacity": 0.72},
-                tooltip=tooltip,
-                name="Selected three-domain targets",
-            ).add_to(m)
+with tab_summary:
+    st.header("Orchard at a glance")
+    w=int(as_bool(gdf["WATER_SUPPORTED"]).sum()); b=int(as_bool(gdf["BIOCHEMICAL_SUPPORTED"]).sum()); s=int(as_bool(gdf["STRUCTURE_LOW_STATURE"]).sum())
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("💧 Water evidence",w,f"{100*w/len(gdf):.1f}% of orchard")
+    c2.metric("🧪 Biochemical evidence",b,f"{100*b/len(gdf):.1f}% of orchard")
+    c3.metric("🌳 Low stature",s,f"{100*s/len(gdf):.1f}% of orchard")
+    c4.metric("🔴 All 3 domains",int((gdf["SUPPORTED_DOMAIN_COUNT"]==3).sum()),"highest cross-domain priority")
 
-        folium.LayerControl().add_to(m)
-        st_folium(m, height=650, use_container_width=True)
+    left,right=st.columns(2)
+    with left:
+        dc=gdf["SUPPORTED_DOMAIN_COUNT"].value_counts().sort_index().reset_index(); dc.columns=["Supported domains","Trees"]
+        fig=px.pie(dc,values="Trees",names="Supported domains",hole=.55,title="How many domains support each tree?")
+        st.plotly_chart(fig,use_container_width=True)
+    with right:
+        domain_df=pd.DataFrame({"Domain":["Water","Biochemical","Structure"],"Trees":[w,b,s]})
+        fig=px.bar(domain_df,x="Domain",y="Trees",text="Trees",title="Supported evidence by domain")
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig,use_container_width=True)
 
-    with col_detail:
-        st.header(SCENARIOS[selected_scenario][0])
-        st.write(SCENARIOS[selected_scenario][1])
-        with st.expander("Scientific interpretation", expanded=True):
-            st.markdown(SCENARIOS[selected_scenario][2])
+    left,right=st.columns(2)
+    with left:
+        patt=gdf["CROSS_DOMAIN_PATTERN"].map(human_pattern).value_counts().reset_index(); patt.columns=["Pattern","Trees"]
+        fig=px.bar(patt,x="Trees",y="Pattern",orientation="h",title="Cross-domain combinations")
+        fig.update_layout(height=430,yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig,use_container_width=True)
+    with right:
+        comp=gdf["MULTIDOMAIN_COMPLETENESS"].replace({"COMPLETE_3_OF_3":"Complete: 3/3 domains","PARTIAL_2_OF_3":"Partial: 2/3 domains","LIMITED_0_OR_1_OF_3":"Limited: 0–1/3 domains"}).value_counts().reset_index(); comp.columns=["Completeness","Trees"]
+        fig=px.pie(comp,values="Trees",names="Completeness",hole=.55,title="Data completeness")
+        st.plotly_chart(fig,use_container_width=True)
+    st.warning("No supported anomaly ≠ confirmed healthy. A tree may be data-limited, outside these rule thresholds, younger/pruned, or affected by a factor not represented in the three domains.")
 
-        if selected_scenario == "GAP_ANALYSIS":
-            st.metric("Orchard trees", total_trees)
-            st.metric("Calculated planting gaps", total_gaps)
-            st.metric("Estimated planting-capacity loss", f"{yield_loss_percentage:.2f}%")
-        elif selected_scenario == "OVERVIEW":
-            st.metric("Orchard trees", len(gdf))
-            st.dataframe(
-                gdf["FIELD_INSPECTION_TIER"].value_counts().rename_axis("Inspection tier").reset_index(name="Trees"),
-                hide_index=True, use_container_width=True,
-            )
+    with st.expander("Show exact orchard counts / download"):
+        exact=pd.DataFrame({
+            "Inspection tier":gdf["FIELD_INSPECTION_TIER"].map(human_tier).value_counts(),
+        }).reset_index().rename(columns={"index":"Category","Inspection tier":"Trees"})
+        st.dataframe(exact,hide_index=True,use_container_width=True)
+        cols=["tree_id","FIELD_INSPECTION_TIER","CROSS_DOMAIN_PATTERN","SUPPORTED_DOMAIN_COUNT","ASSESSABLE_DOMAIN_COUNT","WATER_EVIDENCE_STATUS","BIOCHEMICAL_STATUS","STRUCTURE_STATUS_FINAL","CROSS_DOMAIN_INTERPRETATION"]
+        st.download_button("Download orchard summary CSV",gdf[[c for c in cols if c in gdf.columns]].to_csv(index=False).encode(),"orchard_three_domain_summary.csv","text/csv")
+
+with tab_validation:
+    st.header("Validation & robustness — research view")
+    st.caption("This page preserves the internal validation metrics from the earlier research app and adds an external ground-spectroradiometer module. Internal robustness is not the same as field accuracy.")
+    if view in {"SCREENING","GAPS"}:
+        st.info("For rule robustness, choose Water, Biochemical, Structure or Combined multi-domain priority in the sidebar.")
+    else:
+        reference_mask = gdf["FIELD_INSPECTION_TIER"].eq("NO_SUPPORTED_ANOMALY") & gdf["MULTIDOMAIN_COMPLETENESS"].eq("COMPLETE_3_OF_3")
+        current_mask = target_mask.astype(bool)
+        a,b,c=st.columns(3)
+        a.metric("Highlighted trees",int(current_mask.sum()))
+        b.metric("Internal reference trees",int(reference_mask.sum()))
+        c.metric("Reference share",f"{100*reference_mask.mean():.1f}%")
+
+        st.subheader("1. Multi-domain / multi-indicator concordance")
+        if view=="WATER":
+            temp=pd.DataFrame({"Water status":gdf["WATER_EVIDENCE_STATUS"].value_counts()}).reset_index(); st.dataframe(temp,hide_index=True,use_container_width=True)
+        elif view=="BIOCHEMICAL":
+            temp=pd.DataFrame({"Biochemical status":gdf["BIOCHEMICAL_STATUS"].value_counts()}).reset_index(); st.dataframe(temp,hide_index=True,use_container_width=True)
+        elif view=="STRUCTURE":
+            temp=pd.DataFrame({"Structure status":gdf["STRUCTURE_STATUS_FINAL"].value_counts()}).reset_index(); st.dataframe(temp,hide_index=True,use_container_width=True)
         else:
-            target_count = len(target_gdf)
-            st.metric("Target trees", target_count, f"{100*target_count/len(gdf):.1f}% of orchard")
-            if target_count:
-                st.dataframe(
-                    target_gdf["CROSS_DOMAIN_PATTERN"].value_counts().rename_axis("Pattern").reset_index(name="Trees"),
-                    hide_index=True, use_container_width=True,
-                )
+            temp=gdf["SUPPORTED_DOMAIN_COUNT"].value_counts().sort_index().reset_index(); temp.columns=["Supported domains","Trees"]; st.dataframe(temp,hide_index=True,use_container_width=True)
 
-        st.markdown("---")
-        st.subheader("Field export")
-        if selected_scenario != "GAP_ANALYSIS" and selected_scenario != "OVERVIEW" and not target_gdf.empty:
-            st.download_button(
-                f"Download {len(target_gdf)} target crowns (GeoJSON)",
-                target_gdf.to_json(),
-                file_name=f"three_domain_{selected_scenario}.geojson",
-                mime="application/geo+json",
-            )
-            kml = build_tree_navigation_kml(
-                target_gdf,
-                layer_title=SCENARIOS[selected_scenario][0],
-                color_hex=SCENARIO_COLORS.get(selected_scenario, "#FF0000"),
-            )
-            st.download_button(
-                f"📍 Download {len(target_gdf)} target trees (KML)",
-                data=kml,
-                file_name=f"three_domain_{selected_scenario}.kml",
-                mime="application/vnd.google-earth.kml+xml",
-            )
-        elif selected_scenario == "GAP_ANALYSIS" and len(gaps_gdf):
-            st.download_button(
-                f"Download {len(gaps_gdf)} planting gaps (GeoJSON)", gaps_gdf.to_json(),
-                file_name="calculated_orchard_gaps.geojson", mime="application/geo+json"
-            )
+        st.subheader("2. Spectral consistency against the internal reference")
+        band_cols=[c for c in spectral_df.columns if str(c).startswith("Band_")] if not spectral_df.empty else []
+        if not spectral_df.empty and band_cols and current_mask.any() and reference_mask.any():
+            key="tree_id" if "tree_id" in spectral_df.columns else ("generated_id" if "generated_id" in spectral_df.columns and "generated_id" in gdf.columns else None)
+            if key:
+                target_ids=gdf.loc[current_mask,key].tolist(); ref_ids=gdf.loc[reference_mask,key].tolist()
+                t=spectral_df[spectral_df[key].isin(target_ids)]; r=spectral_df[spectral_df[key].isin(ref_ids)]
+                if len(t) and len(r):
+                    tm=t[band_cols].apply(pd.to_numeric,errors="coerce").mean().to_numpy(float); rm=r[band_cols].apply(pd.to_numeric,errors="coerce").mean().to_numpy(float)
+                    sam=spectral_angle_deg(tm,rm); rms=spectral_rmse(tm,rm)
+                    q1,q2=st.columns(2); q1.metric("Spectral angle",f"{sam:.3f}°" if np.isfinite(sam) else "NA"); q2.metric("Reflectance RMSE",f"{rms:.5f}" if np.isfinite(rms) else "NA")
+                    x=np.arange(1,len(band_cols)+1)
+                    fig=go.Figure(); fig.add_trace(go.Scatter(x=x,y=tm,name="Highlighted mean")); fig.add_trace(go.Scatter(x=x,y=rm,name="Internal reference mean")); fig.update_layout(title="Consensus canopy spectra",xaxis_title="Band number",yaxis_title="Reflectance",height=370)
+                    st.plotly_chart(fig,use_container_width=True)
+                else: st.info("No post-QC consensus spectra overlap both groups.")
+            else: st.info("Consensus spectrum table has no usable tree identifier.")
+        else: st.info("Post-QC consensus spectra are unavailable or one comparison group is empty.")
 
-        # Always provide all 2/3-domain field priorities.
-        priority = gdf[gdf["SUPPORTED_DOMAIN_COUNT"] >= 2].copy()
-        if len(priority):
-            priority_kml = build_tree_navigation_kml(priority, "All Two/Three-Domain Priority Trees", "#FF4500")
-            st.download_button(
-                f"⭐ Download all 2/3-domain priority trees ({len(priority)}) KML",
-                data=priority_kml,
-                file_name="field_navigation_ALL_MULTI_DOMAIN_PRIORITY.kml",
-                mime="application/vnd.google-earth.kml+xml",
-            )
+        st.subheader("3. Threshold sensitivity and Jaccard robustness")
+        schemes=["P20","P25","P30"]
+        runs={s:sensitivity_target_mask(gdf,view,s,combined_mode) for s in schemes}
+        sens=pd.DataFrame({"Scheme":schemes,"Highlighted trees":[int(runs[s].sum()) for s in schemes]})
+        st.plotly_chart(px.bar(sens,x="Scheme",y="Highlighted trees",text="Highlighted trees",title="How target count changes when thresholds move"),use_container_width=True)
+        jac=pd.DataFrame(index=schemes,columns=schemes,dtype=float)
+        for i in schemes:
+            for j in schemes: jac.loc[i,j]=jaccard(runs[i],runs[j])
+        st.write("Jaccard similarity (1.0 = identical target set)"); st.dataframe(jac.round(3),use_container_width=True)
+        if runs["P25"].any():
+            stability=np.c_[runs["P20"],runs["P25"],runs["P30"]].mean(axis=1)
+            stable=float(np.mean(stability[runs["P25"].to_numpy()] == 1.0)); st.metric("P25 targets retained in all three schemes",f"{100*stable:.1f}%")
 
+        st.subheader("4. Highlighted vs internal-reference distributions")
+        stats_df=comparison_statistics(gdf,current_mask,reference_mask,scenario_metrics(view))
+        if not stats_df.empty: st.dataframe(stats_df.round(5),hide_index=True,use_container_width=True)
+        else: st.info("Not enough observations for a group comparison.")
 
-# -----------------------------------------------------------------------------
-# TAB 2 — TREE EVIDENCE
-# -----------------------------------------------------------------------------
-with tab_tree:
-    st.header(f"Tree {selected_tree_id} — Three-Domain Evidence")
+        st.subheader("5. Structural corroboration")
+        if current_mask.any():
+            low=as_bool(gdf["STRUCTURE_LOW_STATURE"]); cor=as_bool(gdf["STRUCTURE_CORROBORATED"])
+            c1,c2=st.columns(2); c1.metric("Highlighted trees also low stature",int((current_mask&low).sum())); c2.metric("...with raster corroboration",int((current_mask&low&cor).sum()))
+        st.caption("Structural agreement strengthens internal plausibility but does not establish the cause of the spectral anomaly.")
 
-    a, b, c, d = st.columns(4)
-    a.metric("Supported domains", f"{int(selected_tree.get('SUPPORTED_DOMAIN_COUNT', 0))}/3")
-    b.metric("Assessable domains", f"{int(selected_tree.get('ASSESSABLE_DOMAIN_COUNT', 0))}/3")
-    c.metric("Inspection tier", str(selected_tree.get("FIELD_INSPECTION_TIER", "NA")))
-    d.metric("Pattern", str(selected_tree.get("CROSS_DOMAIN_PATTERN", "NA")))
+        st.subheader("6. Multivariate feature-space corroboration (PCA)")
+        features=scenario_metrics("COMBINED")
+        pca_df,explained,used=pca_feature_space(gdf,features,current_mask,reference_mask)
+        if not pca_df.empty:
+            fig=px.scatter(pca_df,x="PC1",y="PC2",color="Group",hover_data=["tree_id"],title=f"PCA feature space — PC1 {explained[0]:.1f}%, PC2 {explained[1]:.1f}%")
+            st.plotly_chart(fig,use_container_width=True)
+            with st.expander("Features used in PCA"): st.write(used)
+        else: st.info("Insufficient numeric features for PCA.")
 
-    st.info(str(selected_tree.get("CROSS_DOMAIN_INTERPRETATION", "No interpretation available.")))
-
-    water_col, bio_col, struct_col = st.columns(3)
-
-    with water_col:
-        st.subheader("💧 Water")
-        st.write(f"**State:** {selected_tree.get('WATER_DOMAIN_STATE', 'NA')}")
-        st.write(f"**Final status:** {selected_tree.get('WATER_EVIDENCE_STATUS', 'NA')}")
-        st.write(f"**Measurement quality:** {selected_tree.get('WATER_MEASUREMENT_QUALITY', 'NA')}")
-        water_table = pd.DataFrame([
-            ["WBI", fmt(selected_tree.get("WBI_VALUE"), 6), "Direct VNIR water block"],
-            ["NDMI2", fmt(selected_tree.get("NDMI2_VALUE"), 6), "SWIR water block"],
-            ["NDSI_RWC", fmt(selected_tree.get("NDSI_RWC_VALUE"), 6), "SWIR water block"],
-            ["PRI", fmt(selected_tree.get("PRI_VALUE"), 6), "Physiological corroboration"],
-        ], columns=["Indicator", "Value", "Role"])
-        st.dataframe(water_table, hide_index=True, use_container_width=True)
-        if "WBI_WATER_BLOCK" in selected_tree.index:
-            st.caption(f"WBI block: {selected_tree.get('WBI_WATER_BLOCK')} | SWIR block: {selected_tree.get('SWIR_WATER_BLOCK')} | PRI support: {selected_tree.get('PRI_PHYSIOLOGICAL_SUPPORT')}")
-
-    with bio_col:
-        st.subheader("🧪 Biochemical")
-        st.write(f"**State:** {selected_tree.get('BIOCHEMICAL_DOMAIN_STATE', 'NA')}")
-        st.write(f"**Final status:** {selected_tree.get('BIOCHEMICAL_STATUS', 'NA')}")
-        bio_table = pd.DataFrame([
-            ["NDRE", fmt(selected_tree.get("NDRE_VALUE"), 6), "Chlorophyll/red-edge amplitude"],
-            ["CIred-edge", fmt(selected_tree.get("CIRED_EDGE_VALUE"), 6), "Chlorophyll/red-edge amplitude"],
-            ["REP", fmt(selected_tree.get("REP_D1_NM_VALUE"), 3), "Red-edge position"],
-            ["PSRI", fmt(selected_tree.get("PSRI_VALUE"), 6), "Senescence/pigment"],
-            ["SIPI", fmt(selected_tree.get("SIPI_VALUE"), 6), "Pigment balance"],
-            ["ARI1", fmt(selected_tree.get("ARI1_VALUE"), 6), "Corroborative only"],
-            ["NDVI", fmt(selected_tree.get("NDVI_VALUE"), 6), "Vigor context only"],
-        ], columns=["Indicator", "Value", "Role"])
-        st.dataframe(bio_table, hide_index=True, use_container_width=True)
-        if "BIO_CHL_RE_SUPPORTED" in selected_tree.index:
-            st.caption(
-                f"Chlorophyll/red-edge supported: {selected_tree.get('BIO_CHL_RE_SUPPORTED')} | "
-                f"Pigment supported: {selected_tree.get('BIO_PIGMENT_SUPPORTED')} | ARI1 corroboration: {selected_tree.get('BIO_ARI1_HIGH')}"
-            )
-
-    with struct_col:
-        st.subheader("🌳 Structure")
-        st.write(f"**State:** {selected_tree.get('STRUCTURE_DOMAIN_STATE', 'NA')}")
-        st.write(f"**Final status:** {selected_tree.get('STRUCTURE_STATUS_FINAL', 'NA')}")
-        st.write(f"**Evidence strength:** {selected_tree.get('STRUCTURE_EVIDENCE_STRENGTH', 'NA')}")
-        struct_table = pd.DataFrame([
-            ["LAS H_P95 (m)", fmt(selected_tree.get("H_P95_m"), 3), "Primary structural indicator"],
-            ["Raster CHM P95 (m)", fmt(selected_tree.get("RASTER_CHM_P95_m"), 3), "Measurement corroboration"],
-            ["H_IQR (m)", fmt(selected_tree.get("H_IQR_m"), 3), "Vertical-complexity context"],
-        ], columns=["Metric", "Value", "Role"])
-        st.dataframe(struct_table, hide_index=True, use_container_width=True)
-        st.caption(f"Structural QC: {selected_tree.get('STRUCTURE_QC_FINAL', 'NA')}")
+        st.subheader("7. Spatial coherence (exploratory kNN Moran's I)")
+        I,p,prev,lift=morans_i_knn(gdf,current_mask,k=4,permutations=199)
+        if np.isfinite(I):
+            c1,c2,c3=st.columns(3); c1.metric("Moran's I",f"{I:.3f}"); c2.metric("Permutation pseudo-p",f"{p:.3f}"); c3.metric("Flagged-neighbor lift",f"{lift:.2f}×" if np.isfinite(lift) else "NA")
+        else: st.info("Spatial coherence requires a non-trivial mix of highlighted and non-highlighted trees.")
 
     st.markdown("---")
-    st.subheader("Optional post-QC consensus hyperspectral signature — display only")
-    if spectral_df.empty:
-        st.info("Post-QC consensus spectral CSV is not present. This does not affect the finalized three-domain classification.")
+    st.subheader("8. Ground spectroradiometer validation")
+    st.write("Use the processed SVC/XHR ground spectra here. This is the external validation layer only when spectra are tree-matched and collected close enough to the UAV acquisition to be biologically comparable.")
+    auto_ground=first_existing(GROUND_SPECTRA_CANDIDATES)
+    upload=st.file_uploader("Upload processed ground spectroradiometer CSV",type=["csv"],key="ground_spec")
+    ground_raw=None
+    if upload is not None:
+        ground_raw=pd.read_csv(upload)
+    elif auto_ground is not None:
+        ground_raw=pd.read_csv(auto_ground); st.caption(f"Loaded ground spectra: {auto_ground.name}")
+    if ground_raw is None:
+        st.info("No processed ground spectroradiometer CSV is loaded yet. The internal validation sections above remain fully functional.")
+        st.caption("Accepted formats: long form [tree_id/spectrum_id, wavelength_nm, reflectance] or wide form with wavelength-named columns. For UAV-vs-ground quantitative validation, a tree_id mapping is required.")
     else:
-        # Try tree_id first; generated_id only as legacy fallback.
-        subset = pd.DataFrame()
-        if "tree_id" in spectral_df.columns:
-            subset = spectral_df[spectral_df["tree_id"] == selected_tree_id]
-        elif "generated_id" in spectral_df.columns and "generated_id" in selected_tree.index:
-            subset = spectral_df[spectral_df["generated_id"] == selected_tree.get("generated_id")]
-
-        band_cols = [c for c in spectral_df.columns if str(c).startswith("Band_")]
-        if not subset.empty and band_cols:
-            y = subset.iloc[0][band_cols].apply(pd.to_numeric, errors="coerce").to_numpy(float)
-            x = np.arange(1, len(band_cols) + 1)
-            fig, ax = plt.subplots(figsize=(10, 3.6))
-            ax.plot(x, y)
-            ax.set_xlabel("Band number")
-            ax.set_ylabel("Reflectance")
-            ax.set_title(f"Tree {selected_tree_id} post-QC consensus canopy spectrum")
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+        ground_long,id_col=normalize_ground_long(ground_raw)
+        if ground_long.empty:
+            st.error("Could not identify spectrum ID, wavelength and reflectance columns in this file.")
         else:
-            st.info("No matching post-QC consensus spectrum is available for this tree (this does not affect its final rule status).")
+            scale=st.selectbox("Ground reflectance scale",["Auto","Fraction (0–1)","Percent (0–100)"],index=0)
+            ground_idx=compute_ground_indices(ground_long,id_col,scale)
+            st.success(f"Parsed {ground_idx[id_col].nunique()} ground spectra.")
+            if id_col != "tree_id":
+                st.warning("The file has spectrum_id but no tree_id. Upload a mapping CSV with columns spectrum_id,tree_id to compare ground spectra with UAV trees.")
+                map_upload=st.file_uploader("Optional spectrum-to-tree mapping CSV",type=["csv"],key="ground_map")
+                if map_upload is not None:
+                    mp=pd.read_csv(map_upload)
+                    if {"spectrum_id","tree_id"}.issubset(mp.columns): ground_idx=ground_idx.merge(mp[["spectrum_id","tree_id"]],on="spectrum_id",how="left")
+            if "tree_id" in ground_idx.columns:
+                merged=ground_idx.merge(gdf.drop(columns="geometry"),on="tree_id",how="inner")
+                st.metric("Tree-matched ground spectra",len(merged))
+                pairs=[("GROUND_WBI","WBI_VALUE","WBI"),("GROUND_PRI","PRI_VALUE","PRI"),("GROUND_NDVI","NDVI_VALUE","NDVI"),("GROUND_NDRE","NDRE_VALUE","NDRE"),("GROUND_CIRED_EDGE","CIRED_EDGE_VALUE","CIred-edge"),("GROUND_REP_D1_NM","REP_D1_NM_VALUE","REP"),("GROUND_PSRI","PSRI_VALUE","PSRI"),("GROUND_SIPI","SIPI_VALUE","SIPI"),("GROUND_ARI1","ARI1_VALUE","ARI1"),("GROUND_NDMI2","NDMI2_VALUE","NDMI2"),("GROUND_NDSI_RWC","NDSI_RWC_VALUE","NDSI-RWC")]
+                rows=[]
+                for gc,uc,label in pairs:
+                    if gc not in merged.columns or uc not in merged.columns: continue
+                    x=pd.to_numeric(merged[gc],errors="coerce"); y=pd.to_numeric(merged[uc],errors="coerce"); mask=x.notna()&y.notna()
+                    if mask.sum()<2: continue
+                    xv=x[mask].to_numpy(float); yv=y[mask].to_numpy(float); r=np.corrcoef(xv,yv)[0,1] if len(xv)>=2 else np.nan
+                    rows.append({"Index":label,"n":len(xv),"Pearson r":r,"MAE":np.mean(np.abs(yv-xv)),"RMSE":np.sqrt(np.mean((yv-xv)**2)),"Bias (UAV-ground)":np.mean(yv-xv)})
+                metrics=pd.DataFrame(rows)
+                if not metrics.empty:
+                    st.dataframe(metrics.round(4),hide_index=True,use_container_width=True)
+                    choice=st.selectbox("Plot ground vs UAV index",metrics["Index"].tolist())
+                    gc,uc,_=next(p for p in pairs if p[2]==choice)
+                    plot=merged[["tree_id",gc,uc]].dropna().rename(columns={gc:"Ground",uc:"UAV"})
+                    fig=px.scatter(plot,x="Ground",y="UAV",hover_data=["tree_id"],title=f"{choice}: ground spectroradiometer vs UAV crown")
+                    if len(plot):
+                        lo=min(plot["Ground"].min(),plot["UAV"].min()); hi=max(plot["Ground"].max(),plot["UAV"].max()); fig.add_shape(type="line",x0=lo,y0=lo,x1=hi,y1=hi,line=dict(dash="dash"))
+                    st.plotly_chart(fig,use_container_width=True)
+                else: st.info("Matched trees exist, but not enough paired index values were available for quantitative comparison.")
 
-
-# -----------------------------------------------------------------------------
-# TAB 3 — ORCHARD SUMMARY
-# -----------------------------------------------------------------------------
-with tab_summary:
-    st.header("Orchard-Level Three-Domain Summary")
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Trees", len(gdf))
-    k2.metric("3 supported domains", int((gdf["SUPPORTED_DOMAIN_COUNT"] == 3).sum()))
-    k3.metric("2 supported domains", int((gdf["SUPPORTED_DOMAIN_COUNT"] == 2).sum()))
-    k4.metric("≥1 supported domain", int((gdf["SUPPORTED_DOMAIN_COUNT"] >= 1).sum()))
-
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Supported-domain count")
-        domain_counts = gdf["SUPPORTED_DOMAIN_COUNT"].value_counts().sort_index().rename_axis("Supported domains").reset_index(name="Trees")
-        st.dataframe(domain_counts, hide_index=True, use_container_width=True)
-
-        st.subheader("Cross-domain patterns")
-        pattern_counts = gdf["CROSS_DOMAIN_PATTERN"].value_counts().rename_axis("Pattern").reset_index(name="Trees")
-        st.dataframe(pattern_counts, hide_index=True, use_container_width=True)
-
-    with right:
-        st.subheader("Field inspection tiers")
-        tier_counts = gdf["FIELD_INSPECTION_TIER"].value_counts().rename_axis("Tier").reset_index(name="Trees")
-        st.dataframe(tier_counts, hide_index=True, use_container_width=True)
-
-        st.subheader("Assessment completeness")
-        completeness = gdf["MULTIDOMAIN_COMPLETENESS"].value_counts().rename_axis("Completeness").reset_index(name="Trees")
-        st.dataframe(completeness, hide_index=True, use_container_width=True)
-
-    st.warning(
-        "Do not interpret 0 supported domains as confirmed healthy. Trees in DATA_LIMITED_REVIEW may have incomplete evidence, "
-        "and NO_SUPPORTED_ANOMALY means only that no finalized supported-evidence condition was met."
-    )
-
-    export_cols = [
-        "tree_id", "FIELD_INSPECTION_TIER", "CROSS_DOMAIN_PATTERN", "SUPPORTED_DOMAIN_COUNT",
-        "ASSESSABLE_DOMAIN_COUNT", "WATER_EVIDENCE_STATUS", "BIOCHEMICAL_STATUS", "STRUCTURE_STATUS_FINAL",
-        "CROSS_DOMAIN_INTERPRETATION",
-    ]
-    export_cols = [c for c in export_cols if c in gdf.columns]
-    summary_csv = gdf[export_cols].to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download orchard three-domain summary CSV",
-        summary_csv,
-        file_name="orchard_three_domain_summary.csv",
-        mime="text/csv",
-    )
-
-
-# -----------------------------------------------------------------------------
-# TAB 4 — RULES / METHODS
-# -----------------------------------------------------------------------------
-with tab_methods:
-    st.header("Final Deterministic Framework")
-    st.code(
-        """
-TREE
- │
- ├── WATER STATUS
- │     WBI direct block
- │     + SWIR block (NDMI2 + NDSI_RWC counted as ONE block)
- │     + PRI physiological corroboration
- │
- ├── CANOPY BIOCHEMICAL STATUS
- │     Chlorophyll/red-edge sub-block: NDRE + CIred-edge + REP
- │     Pigment/senescence sub-block: PSRI + SIPI
- │     ARI1 corroboration; NDVI context only
- │
- └── STRUCTURE
-       LAS H_P95 primary
-       Raster CHM P95 measurement corroboration
-       H_IQR context only
-
-Then compare the THREE domain-level outcomes.
-No raw index is allowed to become an extra final-domain vote.
-        """,
-        language="text",
-    )
-
-    st.subheader("Operational thresholds")
-    threshold_rows = [
-        ["Biochemical", "NDRE", f"≤ {BIO_THRESHOLDS['NDRE_LOW_MAX']:.6f}", "chlorophyll/red-edge"],
-        ["Biochemical", "CIred-edge", f"≤ {BIO_THRESHOLDS['CIRED_LOW_MAX']:.6f}", "chlorophyll/red-edge"],
-        ["Biochemical", "REP", f"≤ {BIO_THRESHOLDS['REP_LOW_MAX_NM']:.3f} nm", "red-edge position"],
-        ["Biochemical", "PSRI", f"≥ {BIO_THRESHOLDS['PSRI_HIGH_MIN']:.6f}", "pigment/senescence"],
-        ["Biochemical", "SIPI", f"≥ {BIO_THRESHOLDS['SIPI_HIGH_MIN']:.6f}", "pigment/senescence"],
-        ["Biochemical", "ARI1", f"≥ {BIO_THRESHOLDS['ARI1_HIGH_MIN']:.6f}", "corroborative only"],
-        ["Structure", "LAS H_P95", f"≤ {STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m", "operational low stature"],
-        ["Structure", "Raster CHM P95", f"≤ {STRUCTURE_THRESHOLDS['RASTER_CHM_P95_P25_M']:.3f} m", "measurement corroboration"],
-        ["Structure", "H_IQR", f"≥ {STRUCTURE_THRESHOLDS['H_IQR_P75_M']:.3f} m", "context only"],
-    ]
-    st.dataframe(pd.DataFrame(threshold_rows, columns=["Domain", "Indicator", "Operational condition", "Role"]), hide_index=True, use_container_width=True)
-
-    st.subheader("Water-domain logic")
-    st.markdown(
-        "- **Supported water anomaly:** WBI abnormal **and** SWIR water block concordantly abnormal.\n"
-        "- **Strong internal water evidence:** supported direct-water condition **plus** PRI abnormal.\n"
-        "- NDMI2 and NDSI_RWC are highly redundant and are therefore counted as **one SWIR block**, not two votes.\n"
-        "- Missing/failed direct-water evidence is never converted to normal."
-    )
-
-    st.subheader("Biochemical-domain logic")
-    st.markdown(
-        "- Chlorophyll/red-edge support requires **NDRE low + CIred-edge low + REP low**.\n"
-        "- Pigment/senescence support requires **PSRI high + SIPI high**.\n"
-        "- Both sub-blocks together create **CONCORDANT_BIOCHEMICAL_DECLINE**.\n"
-        "- ARI1 high upgrades this to **STRONG_CONCORDANT_BIOCHEMICAL_DECLINE**.\n"
-        "- NDVI remains context and is not an independent final biochemical vote."
-    )
-
-    st.subheader("Structural-domain logic")
-    st.markdown(
-        f"- LAS H_P95 ≤ **{STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m** = orchard-relative low stature.\n"
-        f"- Raster CHM P95 ≤ **{STRUCTURE_THRESHOLDS['RASTER_CHM_P95_P25_M']:.3f} m** corroborates the structural measurement.\n"
-        "- H_IQR is retained only as vertical-complexity context.\n"
-        "- Structural status describes relative canopy stature and does not identify a causal stress."
-    )
-
-    st.subheader("Cross-domain interpretation boundary")
-    st.info(
-        "Water, Biochemical and Structure are assessed independently first. Their agreement strengthens internal evidence, "
-        "but cross-domain concordance does not prove that one domain caused another."
-    )
-
-
-# =============================================================================
-# 10. OPTIONAL LLM — STRICTLY DOWNSTREAM
-# =============================================================================
-
-with st.sidebar.expander("🤖 LLM Field Assistant", expanded=False):
-    st.markdown("Natural-language support only. The deterministic three-domain result above is calculated first.")
-
-    if not GEMINI_AVAILABLE:
-        st.info("google-generativeai is not installed; the three-domain app remains fully functional.")
-    else:
-        api_key = st.text_input("Gemini API key", type="password")
-        model_name = st.text_input("Gemini model", value=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
-
-        active_name = SCENARIOS[selected_scenario][0]
-        target_count = len(target_gdf) if selected_scenario not in {"GAP_ANALYSIS", "OVERVIEW"} else len(gdf)
-        selected_context = (
-            f"Tree {selected_tree_id}: water={selected_tree.get('WATER_EVIDENCE_STATUS', 'NA')}; "
-            f"biochemical={selected_tree.get('BIOCHEMICAL_STATUS', 'NA')}; "
-            f"structure={selected_tree.get('STRUCTURE_STATUS_FINAL', 'NA')}; "
-            f"pattern={selected_tree.get('CROSS_DOMAIN_PATTERN', 'NA')}; "
-            f"inspection tier={selected_tree.get('FIELD_INSPECTION_TIER', 'NA')}."
-        )
-
-        system_prompt = f"""
-You are a precision-agriculture decision-support assistant for a UAV hyperspectral citrus orchard study.
-
-ACTIVE MAP LAYER: {active_name}
-TARGET COUNT: {target_count}
-SELECTED TREE CONTEXT: {selected_context}
-
-Critical constraints:
-- Treat WATER, BIOCHEMICAL and STRUCTURE as the only final major domains.
-- Do not count correlated indices as additional independent domain votes.
-- Cross-domain agreement is corroboration, not causal proof.
-- Do not call a tree healthy merely because no supported anomaly was detected.
-- Do not infer disease identity, drought cause, nutrient deficiency, root rot, pest, heat or frost without field evidence.
-- Structural low stature is relative orchard stature, not proof of stress.
-- PRI, NDVI and H_IQR are supporting/context variables according to the deterministic framework.
-- Keep recommendations framed as field-inspection priorities and measurements to verify.
-"""
-
-        if st.button("Generate selected-tree inspection plan"):
-            if not api_key:
-                st.warning("Enter an API key first.")
+                # Optional full-spectrum ground-vs-UAV comparison when exact UAV wavelength mapping is available.
+                wl_map, wl_source = load_wavelength_map()
+                band_cols_uav = [c for c in spectral_df.columns if str(c).startswith("Band_")] if not spectral_df.empty else []
+                spec_key = "tree_id" if "tree_id" in spectral_df.columns else ("generated_id" if "generated_id" in spectral_df.columns and "generated_id" in gdf.columns else None)
+                if wl_map and band_cols_uav and spec_key:
+                    # If spectral table uses generated_id, map canonical tree_id to generated_id from final database.
+                    id_bridge = gdf[["tree_id", spec_key]].drop_duplicates() if spec_key != "tree_id" else None
+                    spectral_metrics=[]
+                    for tree_id in merged["tree_id"].dropna().unique():
+                        ground_group = ground_long[ground_long[id_col].eq(tree_id)] if id_col == "tree_id" else pd.DataFrame()
+                        if ground_group.empty and id_col == "spectrum_id" and "spectrum_id" in ground_idx.columns:
+                            sids = ground_idx.loc[ground_idx.get("tree_id").eq(tree_id), "spectrum_id"].tolist()
+                            ground_group = ground_long[ground_long[id_col].isin(sids)]
+                        if ground_group.empty:
+                            continue
+                        lookup_id = tree_id
+                        if spec_key != "tree_id":
+                            bridge = id_bridge[id_bridge["tree_id"].eq(tree_id)]
+                            if bridge.empty: continue
+                            lookup_id = bridge.iloc[0][spec_key]
+                        urow = spectral_df[spectral_df[spec_key].eq(lookup_id)]
+                        if urow.empty: continue
+                        usable=[]
+                        for bc in band_cols_uav:
+                            if bc not in wl_map: continue
+                            gv=spectrum_value(ground_group,float(wl_map[bc]),tol=6.0)
+                            uv=pd.to_numeric(pd.Series([urow.iloc[0][bc]]),errors="coerce").iloc[0]
+                            if pd.notna(gv) and pd.notna(uv): usable.append((gv,float(uv)))
+                        if len(usable)>=20:
+                            ga=np.array([x[0] for x in usable],float); ua=np.array([x[1] for x in usable],float)
+                            spectral_metrics.append({"tree_id":tree_id,"bands compared":len(usable),"SAM_deg":spectral_angle_deg(ga,ua),"RMSE":spectral_rmse(ga,ua),"MAE":float(np.mean(np.abs(ua-ga))),"Bias_UAV_minus_ground":float(np.mean(ua-ga))})
+                    if spectral_metrics:
+                        st.write("**Full-spectrum ground vs UAV agreement**")
+                        st.caption(f"UAV wavelength mapping: {wl_source}")
+                        sm=pd.DataFrame(spectral_metrics)
+                        st.dataframe(sm.round(5),hide_index=True,use_container_width=True)
+                        c1,c2=st.columns(2); c1.metric("Median SAM",f"{sm['SAM_deg'].median():.3f}°"); c2.metric("Median spectral RMSE",f"{sm['RMSE'].median():.5f}")
+                else:
+                    st.caption("Full-spectrum ground-vs-UAV SAM/RMSE becomes available when an exact UAV band-to-wavelength mapping CSV is provided. Index-level ground validation above does not require that mapping.")
             else:
+                st.info("Ground spectra can be visualized, but external UAV comparison requires a tree_id mapping.")
+            with st.expander("Preview computed ground indices"):
+                st.dataframe(ground_idx.head(50),hide_index=True,use_container_width=True)
+
+with tab_methods:
+    st.header("How the system decides")
+    st.markdown("""
+    **Water:** WBI is one direct block; NDMI2 + NDSI-RWC form one concordant SWIR block; PRI is corroboration only.  
+    **Biochemical:** NDRE + CI red-edge + REP form the chlorophyll/red-edge block; PSRI + SIPI form the pigment/senescence block; ARI1 corroborates.  
+    **Structure:** LAS H-P95 is primary; raster CHM P95 corroborates the measurement; H-IQR is context.  
+    **Final integration:** only the three domain outcomes are combined. Raw indices are never counted as extra domains.
+    """)
+    st.subheader("Operational thresholds")
+    rows=[
+        ["Water","WBI",f"≤ {WATER_SENSITIVITY_THRESHOLDS['P25']['WBI_LOW_MAX']:.6f}","direct water block"],
+        ["Water","NDMI2",f"≥ {WATER_SENSITIVITY_THRESHOLDS['P25']['NDMI2_HIGH_MIN']:.6f}","SWIR block"],
+        ["Water","NDSI-RWC",f"≤ {WATER_SENSITIVITY_THRESHOLDS['P25']['NDSI_RWC_LOW_MAX']:.6f}","SWIR block"],
+        ["Water","PRI",f"≤ {WATER_SENSITIVITY_THRESHOLDS['P25']['PRI_LOW_MAX']:.6f}","corroboration only"],
+        ["Biochemical","NDRE",f"≤ {BIO_THRESHOLDS['NDRE_LOW_MAX']:.6f}","chlorophyll/red-edge"],
+        ["Biochemical","CI red-edge",f"≤ {BIO_THRESHOLDS['CIRED_LOW_MAX']:.6f}","chlorophyll/red-edge"],
+        ["Biochemical","REP",f"≤ {BIO_THRESHOLDS['REP_LOW_MAX_NM']:.3f} nm","red-edge position"],
+        ["Biochemical","PSRI",f"≥ {BIO_THRESHOLDS['PSRI_HIGH_MIN']:.6f}","pigment/senescence"],
+        ["Biochemical","SIPI",f"≥ {BIO_THRESHOLDS['SIPI_HIGH_MIN']:.6f}","pigment/senescence"],
+        ["Biochemical","ARI1",f"≥ {BIO_THRESHOLDS['ARI1_HIGH_MIN']:.6f}","corroboration"],
+        ["Structure","LAS H-P95",f"≤ {STRUCTURE_THRESHOLDS['H_P95_P25_M']:.3f} m","primary stature"],
+        ["Structure","Raster CHM P95",f"≤ {STRUCTURE_THRESHOLDS['RASTER_CHM_P95_P25_M']:.3f} m","measurement corroboration"],
+    ]
+    st.dataframe(pd.DataFrame(rows,columns=["Domain","Indicator","Operational condition","Role"]),hide_index=True,use_container_width=True)
+    st.info("The app is downstream of the finalized processing workflow. It does not rerun strip QC, index QC, SWIR consensus or LAS processing.")
+
+
+# =============================================================================
+# 10. OPTIONAL LLM — SCENARIO LEVEL, DOWNSTREAM ONLY
+# =============================================================================
+with st.sidebar.expander("🤖 Field assistant",expanded=False):
+    st.caption("Optional natural-language support. It cannot change the deterministic classification.")
+    if not GEMINI_AVAILABLE:
+        st.info("google-generativeai is not installed; all scientific functions remain available.")
+    else:
+        api_key=st.text_input("Gemini API key",type="password")
+        model_name=st.text_input("Gemini model",value=os.getenv("GEMINI_MODEL","gemini-2.5-flash"))
+        if st.button("Explain current scenario"):
+            if not api_key: st.warning("Enter an API key first.")
+            else:
+                prompt=f"Current view: {VIEW_OPTIONS[view]}; highlighted trees: {len(target_gdf)} of {len(gdf)}. Explain what this means to a field user. Do not diagnose disease or claim causality."
                 try:
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel(model_name, system_instruction=system_prompt)
-                    response = model.generate_content(
-                        "Give a concise field inspection plan for the selected tree. Separate remote-sensing evidence from measurements that must be confirmed in the field."
-                    )
-                    st.markdown(response.text)
-                except Exception as exc:
-                    st.error(f"LLM API error: {exc}")
+                    genai.configure(api_key=api_key); model=genai.GenerativeModel(model_name); response=model.generate_content(prompt); st.markdown(response.text)
+                except Exception as exc: st.error(f"LLM API error: {exc}")
