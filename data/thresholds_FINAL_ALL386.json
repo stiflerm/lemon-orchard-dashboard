@@ -1,0 +1,75 @@
+{
+  "ruleset_version": "SIROHI_ALL386_PIXELWISE_VNIR_COMPLETE_SWIR_1.0",
+  "created_from": {
+    "VNIR": "D:\\hx_UAV_data_processing\\object_based_tree_hsi\\master_tree_indices.csv",
+    "VNIR_method": "Pixel-wise index calculation inside each crown; per-strip crown statistics; quality-aware multi-strip aggregation. All 386 trees have all 11 indices and >=2 strip observations.",
+    "SWIR": "D:\\hx_UAV_data_processing\\object_based_tree_swir\\ALL_386_FINAL\\SWIR_spectra_indices_ALL_386.csv",
+    "SWIR_method": "Complete all-386 tree-level NDMI2 and NDSI-RWC inventory. Single-strip SWIR observations remain assessable but carry lower repeatability confidence.",
+    "Structure": "D:\\hx_UAV_data_processing\\structural_metrics_las\\structural_domain_FINAL_compact.csv"
+  },
+  "reference_population_n": 386,
+  "operational_scheme": "P25",
+  "water_sensitivity_thresholds": {
+    "P20": {
+      "WBI_LOW_MAX": 0.9690500019249836,
+      "PRI_LOW_MAX": -0.0905730434458557,
+      "NDMI2_HIGH_MIN": -0.1545662835303642,
+      "NDSI_RWC_LOW_MAX": 0.2275147933998481
+    },
+    "P25": {
+      "WBI_LOW_MAX": 0.9757391774313189,
+      "PRI_LOW_MAX": -0.08911409982329449,
+      "NDMI2_HIGH_MIN": -0.17966462991292795,
+      "NDSI_RWC_LOW_MAX": 0.2503183311461026
+    },
+    "P30": {
+      "WBI_LOW_MAX": 0.9814822816003782,
+      "PRI_LOW_MAX": -0.08819776837418206,
+      "NDMI2_HIGH_MIN": -0.20547321936301136,
+      "NDSI_RWC_LOW_MAX": 0.2709767238923435
+    }
+  },
+  "bio_sensitivity_thresholds": {
+    "P20": {
+      "NDRE": 0.1844578667858724,
+      "CIRED": 0.4926651655956282,
+      "REP": 725.0386460021978,
+      "PSRI": 0.2528481199394498,
+      "SIPI": 1.728956241202325,
+      "ARI1": 4.714983254171713,
+      "NDVI_LOW": 0.3554331112740969
+    },
+    "P25": {
+      "NDRE": 0.19855332170854129,
+      "CIRED": 0.537857901371525,
+      "REP": 725.2737176552544,
+      "PSRI": 0.23963172170188468,
+      "SIPI": 1.6513272102103487,
+      "ARI1": 4.5148481300807575,
+      "NDVI_LOW": 0.3733449407559582
+    },
+    "P30": {
+      "NDRE": 0.211424422625691,
+      "CIRED": 0.5865508369525407,
+      "REP": 725.5696892329036,
+      "PSRI": 0.2224133400248903,
+      "SIPI": 1.5910005657155422,
+      "ARI1": 4.382755763333412,
+      "NDVI_LOW": 0.3948637672323452
+    }
+  },
+  "water_rule": {
+    "supported": "WBI low AND NDMI2 high AND NDSI-RWC low",
+    "strong_internal": "supported water condition AND PRI low",
+    "SWIR_pair_policy": "NDMI2 + NDSI-RWC are one concordant SWIR block, not two independent votes",
+    "claim_boundary": "Water-related spectral anomaly screening; not confirmed physiological drought."
+  },
+  "biochemical_rule": {
+    "chlorophyll_red_edge_block": "NDRE low AND CIred-edge low AND REP low",
+    "pigment_senescence_block": "PSRI high AND SIPI high",
+    "supported": "both blocks concordant",
+    "ARI1": "additional corroboration only",
+    "claim_boundary": "Relative biochemical/pigment screening; not nutrient- or disease-specific diagnosis."
+  },
+  "important_processing_decision": "The crown-mean-spectrum VNIR recovery table is retained only as an auxiliary product and is NOT used for final rule thresholds because WBI and REP showed material estimator shifts. Final VNIR rules use the original pixel-wise production estimator."
+}
