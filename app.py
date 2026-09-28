@@ -217,12 +217,48 @@ else:
     BIO_SENSITIVITY_THRESHOLDS = _LEGACY_BIO_SENSITIVITY_THRESHOLDS
     BIO_THRESHOLDS = _LEGACY_BIO_THRESHOLDS
 
-GROUND_SPECTRA_CANDIDATES = [
-    DATA_DIR / "ground_spectroradiometer.csv",
-    DATA_DIR / "SVC_ground_validation.csv",
-    DATA_DIR / "SVC_5spectra_analysis_ready.csv",
-    APP_DIR / "ground_spectroradiometer.csv",
-    APP_DIR / "SVC_ground_validation.csv",
+# Final fixed-pair field-reference validation package.
+# These files are generated upstream by Steps 5–7 and are READ-ONLY in the app.
+# The app does not recompute the validation metrics or production classifications.
+VALIDATION_BASE_LOCAL = Path(
+    r"E:\SIROHI_OLD\New Folder\GROUND_VALIDATION_AUDIT"
+    r"\FINAL_SPECTRAL_INDEX_VALIDATION"
+)
+
+VALIDATION_PAIR_CANDIDATES = [
+    DATA_DIR / "STEP7_final_pair_validation_summary.csv",
+    APP_DIR / "STEP7_final_pair_validation_summary.csv",
+    VALIDATION_BASE_LOCAL / "STEP7_FINAL_VALIDATION_PACKAGE" / "STEP7_final_pair_validation_summary.csv",
+]
+
+VALIDATION_DOMAIN_CANDIDATES = [
+    DATA_DIR / "STEP7_domain_threshold_side_agreement.csv",
+    APP_DIR / "STEP7_domain_threshold_side_agreement.csv",
+    VALIDATION_BASE_LOCAL / "STEP7_FINAL_VALIDATION_PACKAGE" / "STEP7_domain_threshold_side_agreement.csv",
+]
+
+VALIDATION_INDEX_CANDIDATES = [
+    DATA_DIR / "STEP7_index_threshold_side_agreement.csv",
+    APP_DIR / "STEP7_index_threshold_side_agreement.csv",
+    VALIDATION_BASE_LOCAL / "STEP7_FINAL_VALIDATION_PACKAGE" / "STEP7_index_threshold_side_agreement.csv",
+]
+
+VALIDATION_PAYLOAD_CANDIDATES = [
+    DATA_DIR / "STEP7_app_validation_payload.json",
+    APP_DIR / "STEP7_app_validation_payload.json",
+    VALIDATION_BASE_LOCAL / "STEP7_FINAL_VALIDATION_PACKAGE" / "STEP7_app_validation_payload.json",
+]
+
+VALIDATION_SPECTRA_CANDIDATES = [
+    DATA_DIR / "STEP5_ground_UAV_VNIR_resampled_spectra.csv",
+    APP_DIR / "STEP5_ground_UAV_VNIR_resampled_spectra.csv",
+    VALIDATION_BASE_LOCAL / "STEP5_GROUND_UAV_VNIR" / "STEP5_ground_UAV_VNIR_resampled_spectra.csv",
+]
+
+VALIDATION_INDEX_LONG_CANDIDATES = [
+    DATA_DIR / "STEP6_ground_vs_UAV_index_validation_long.csv",
+    APP_DIR / "STEP6_ground_vs_UAV_index_validation_long.csv",
+    VALIDATION_BASE_LOCAL / "STEP6_FINAL_VALIDATION_ASSESSMENT" / "STEP6_ground_vs_UAV_index_validation_long.csv",
 ]
 
 WAVELENGTH_MAP_CANDIDATES = [
@@ -272,6 +308,30 @@ def as_bool(series):
     if series.dtype == bool:
         return series.fillna(False)
     return series.astype(str).str.strip().str.lower().isin(["true", "1", "yes"])
+
+
+
+def normalize_ground_sample_id(value):
+    """Normalize fixed field-reference IDs to 0000–0005 without changing scientific mapping."""
+    if pd.isna(value):
+        return None
+    s = str(value).strip()
+    try:
+        f = float(s)
+        if np.isfinite(f) and float(f).is_integer():
+            return f"{int(f):04d}"
+    except Exception:
+        pass
+    hits = re.findall(r"(?<!\d)(\d{4})(?!\d)", s)
+    if hits:
+        for h in reversed(hits):
+            if h in {"0000", "0001", "0002", "0003", "0004", "0005"}:
+                return h
+        return hits[-1]
+    digits = re.sub(r"\D", "", s)
+    if digits and len(digits) <= 4:
+        return digits.zfill(4)
+    return s
 
 
 def supported_structure_mask(df):
@@ -593,6 +653,64 @@ def load_swir_all_index_inventory():
     if df["tree_id"].duplicated().any():
         raise ValueError("All-tree SWIR index inventory contains duplicate tree_id values.")
     return df
+
+
+
+@st.cache_data(show_spinner=False)
+def load_ground_validation_package():
+    """Load finalized Steps 5–7 validation products without recalculating the science."""
+    out = {
+        "pair": pd.DataFrame(),
+        "domain": pd.DataFrame(),
+        "index": pd.DataFrame(),
+        "spectra": pd.DataFrame(),
+        "index_long": pd.DataFrame(),
+        "payload": {},
+        "sources": {},
+    }
+
+    csv_specs = {
+        "pair": VALIDATION_PAIR_CANDIDATES,
+        "domain": VALIDATION_DOMAIN_CANDIDATES,
+        "index": VALIDATION_INDEX_CANDIDATES,
+        "spectra": VALIDATION_SPECTRA_CANDIDATES,
+        "index_long": VALIDATION_INDEX_LONG_CANDIDATES,
+    }
+
+    for key, candidates in csv_specs.items():
+        p = first_existing(candidates)
+        if p is None:
+            continue
+        try:
+            d = pd.read_csv(p)
+            out[key] = d
+            out["sources"][key] = str(p)
+        except Exception:
+            continue
+
+    payload_path = first_existing(VALIDATION_PAYLOAD_CANDIDATES)
+    if payload_path is not None:
+        try:
+            out["payload"] = json.loads(Path(payload_path).read_text(encoding="utf-8"))
+            out["sources"]["payload"] = str(payload_path)
+        except Exception:
+            pass
+
+    for key in ["pair", "spectra", "index_long"]:
+        d = out[key]
+        if d.empty:
+            continue
+        if "GROUND_SAMPLE" in d.columns:
+            d["GROUND_SAMPLE"] = d["GROUND_SAMPLE"].apply(normalize_ground_sample_id)
+        elif "field_file_id" in d.columns:
+            d["GROUND_SAMPLE"] = d["field_file_id"].apply(normalize_ground_sample_id)
+        if "TREE_ID" in d.columns:
+            d["TREE_ID"] = pd.to_numeric(d["TREE_ID"], errors="coerce").astype("Int64")
+        elif "tree_id" in d.columns:
+            d["TREE_ID"] = pd.to_numeric(d["tree_id"], errors="coerce").astype("Int64")
+        out[key] = d
+
+    return out
 
 
 def merge_geometry_and_rules(geometry: gpd.GeoDataFrame, rules: pd.DataFrame) -> gpd.GeoDataFrame:
@@ -1063,80 +1181,6 @@ def load_wavelength_map():
     return {}, path.name
 
 
-def ground_wide_to_long(df):
-    id_col = "tree_id" if "tree_id" in df.columns else ("spectrum_id" if "spectrum_id" in df.columns else None)
-    if id_col is None: return pd.DataFrame(), None
-    rows=[]
-    for c in df.columns:
-        if c == id_col: continue
-        m=re.search(r"(\d{3,4}(?:\.\d+)?)", str(c))
-        if not m: continue
-        wl=float(m.group(1))
-        vals=pd.to_numeric(df[c], errors="coerce")
-        for idx,v in vals.items():
-            if pd.notna(v): rows.append({id_col:df.loc[idx,id_col],"wavelength_nm":wl,"reflectance":float(v)})
-    return pd.DataFrame(rows), id_col
-
-
-def normalize_ground_long(df):
-    cols={c.lower():c for c in df.columns}
-    wave=next((c for k,c in cols.items() if k in {"wavelength_nm","wavelength","nm"} or "wavelength" in k),None)
-    refl=next((c for k,c in cols.items() if k in {"reflectance","refl","value"} or "reflectance" in k),None)
-    id_col="tree_id" if "tree_id" in df.columns else ("spectrum_id" if "spectrum_id" in df.columns else None)
-    if wave and refl and id_col:
-        out=df[[id_col,wave,refl]].rename(columns={wave:"wavelength_nm",refl:"reflectance"}).copy()
-        out["wavelength_nm"]=pd.to_numeric(out["wavelength_nm"],errors="coerce")
-        out["reflectance"]=pd.to_numeric(out["reflectance"],errors="coerce")
-        return out.dropna(),id_col
-    return ground_wide_to_long(df)
-
-
-def spectrum_value(group, target_nm, tol=6.0):
-    if group.empty: return np.nan
-    w=group["wavelength_nm"].to_numpy(float); r=group["reflectance"].to_numpy(float)
-    i=int(np.argmin(np.abs(w-target_nm)))
-    return float(r[i]) if abs(w[i]-target_nm)<=tol else np.nan
-
-
-def compute_ground_indices(long_df, id_col, reflectance_scale="Auto"):
-    if long_df.empty: return pd.DataFrame()
-    d=long_df.copy()
-    if reflectance_scale == "Percent (0–100)": d["reflectance"]=d["reflectance"]/100.0
-    elif reflectance_scale == "Auto":
-        med=np.nanmedian(d["reflectance"].to_numpy(float))
-        if np.isfinite(med) and med>2: d["reflectance"]=d["reflectance"]/100.0
-    rows=[]
-    for sid,g in d.groupby(id_col):
-        R=lambda x:spectrum_value(g,x)
-        vals={x:R(x) for x in [445,500,531,550,570,670,680,700,705,750,800,900,970,1100,1222,2200,2264]}
-        def sd(a,b): return (a-b)/(a+b) if np.isfinite(a) and np.isfinite(b) and abs(a+b)>1e-12 else np.nan
-        row={id_col:sid}
-        row.update({
-            "GROUND_NDVI":sd(vals[800],vals[670]),
-            "GROUND_NDRE":sd(vals[750],vals[705]),
-            "GROUND_CIRED_EDGE":(vals[750]/vals[705]-1) if np.isfinite(vals[750]) and np.isfinite(vals[705]) and abs(vals[705])>1e-12 else np.nan,
-            "GROUND_WBI":(vals[900]/vals[970]) if np.isfinite(vals[900]) and np.isfinite(vals[970]) and abs(vals[970])>1e-12 else np.nan,
-            "GROUND_PRI":sd(vals[531],vals[570]),
-            "GROUND_PSRI":((vals[680]-vals[500])/vals[750]) if np.isfinite(vals[680]) and np.isfinite(vals[500]) and np.isfinite(vals[750]) and abs(vals[750])>1e-12 else np.nan,
-            "GROUND_SIPI":((vals[800]-vals[445])/(vals[800]-vals[680])) if np.isfinite(vals[800]) and np.isfinite(vals[445]) and np.isfinite(vals[680]) and abs(vals[800]-vals[680])>1e-12 else np.nan,
-            "GROUND_ARI1":(1/vals[550]-1/vals[700]) if np.isfinite(vals[550]) and np.isfinite(vals[700]) and vals[550]!=0 and vals[700]!=0 else np.nan,
-            "GROUND_NDMI2":sd(vals[2200],vals[1100]),
-            "GROUND_NDSI_RWC":sd(vals[1222],vals[2264]),
-        })
-        # REP from maximum positive derivative 680–750 nm
-        gg=g[(g["wavelength_nm"]>=680)&(g["wavelength_nm"]<=750)].sort_values("wavelength_nm")
-        if len(gg)>=3:
-            w=gg["wavelength_nm"].to_numpy(float); r=gg["reflectance"].to_numpy(float)
-            der=np.gradient(r,w); row["GROUND_REP_D1_NM"]=float(w[np.nanargmax(der)])
-        else: row["GROUND_REP_D1_NM"]=np.nan
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-# =============================================================================
-
-
-
 
 # =============================================================================
 # 7. USER-FRIENDLY VISUAL / VALIDATION HELPERS
@@ -1398,6 +1442,136 @@ def threshold_table_for_view(view):
     return pd.DataFrame(rows, columns=["Sensitivity scheme", "Domain", "Indicator", "Condition"])
 
 
+
+VALIDATION_INDEX_SECTORS = {
+    "WBI": "900 and 970 nm (VNIR water-band ratio)",
+    "PRI": "531 and 570 nm",
+    "NDMI2": "1097.940 and 2202.750 nm (SWIR)",
+    "NDSI_RWC": "1224.040 and 2262.790 nm (SWIR)",
+    "NDRE": "705 and 750 nm (red edge)",
+    "CIRED_EDGE": "705 and 750 nm (red edge)",
+    "REP_D1_NM": "680–750 nm red-edge derivative region",
+    "PSRI": "500, 680 and 750 nm",
+    "SIPI": "445, 680 and 800 nm",
+    "ARI1": "550 and 700 nm",
+    "NDVI": "670 and 800 nm",
+}
+
+
+def add_field_validation_layer(m, gdf, pair_df):
+    """Optional map overlay for the six fixed field-reference ↔ UAV pairs."""
+    if pair_df is None or pair_df.empty or "TREE_ID" not in pair_df.columns:
+        return
+    pairs = pair_df[[c for c in ["GROUND_SAMPLE", "TREE_ID"] if c in pair_df.columns]].dropna().copy()
+    if pairs.empty:
+        return
+    pairs["TREE_ID"] = pd.to_numeric(pairs["TREE_ID"], errors="coerce").astype("Int64")
+    sample_map = {
+        int(r["TREE_ID"]): str(r.get("GROUND_SAMPLE", "")).zfill(4)
+        for _, r in pairs.dropna(subset=["TREE_ID"]).iterrows()
+    }
+    vg = gdf[gdf["tree_id"].isin(sample_map)].copy()
+    if vg.empty:
+        return
+    vg["FIELD_REFERENCE"] = vg["tree_id"].map(lambda x: f"Ground {sample_map.get(int(x), '')}")
+    tooltip = folium.GeoJsonTooltip(
+        fields=["tree_id", "FIELD_REFERENCE"],
+        aliases=["Tree ID:", "Field reference:"],
+        sticky=True,
+    )
+    folium.GeoJson(
+        vg,
+        style_function=lambda _: {
+            "fillColor": "#00A6D6",
+            "color": "#00A6D6",
+            "weight": 3.0,
+            "dashArray": "6,4",
+            "fillOpacity": 0.04,
+        },
+        tooltip=tooltip,
+        name="Six field-reference validation trees",
+    ).add_to(m)
+
+
+def validation_pair_label(row):
+    sample = normalize_ground_sample_id(row.get("GROUND_SAMPLE", "")) or ""
+    tree = row.get("TREE_ID", "NA")
+    try:
+        tree = int(tree)
+    except Exception:
+        pass
+    return f"Ground {sample} → UAV Tree {tree}"
+
+
+def validation_status_text(flag):
+    try:
+        if pd.isna(flag):
+            return "NA"
+        return "Anomalous side" if int(flag) == 1 else "Reference side"
+    except Exception:
+        return "NA"
+
+
+def plot_field_reference_pair(spectra_df, sample_id, tree_id):
+    if spectra_df is None or spectra_df.empty:
+        return None
+    d = spectra_df.copy()
+    if "GROUND_SAMPLE" in d.columns:
+        d = d[d["GROUND_SAMPLE"].astype(str).eq(str(sample_id))]
+    if "TREE_ID" in d.columns:
+        d = d[pd.to_numeric(d["TREE_ID"], errors="coerce").eq(int(tree_id))]
+    required = {"wavelength_nm", "ground_interpolated", "uav_representative"}
+    if d.empty or not required.issubset(d.columns):
+        return None
+    d = d.sort_values("wavelength_nm")
+    x = pd.to_numeric(d["wavelength_nm"], errors="coerce")
+    g = pd.to_numeric(d["ground_interpolated"], errors="coerce")
+    u = pd.to_numeric(d["uav_representative"], errors="coerce")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=g, mode="lines", name=f"Ground {sample_id} — interpolated"))
+    fig.add_trace(go.Scatter(x=x, y=u, mode="lines", name=f"UAV Tree {tree_id} — representative"))
+    fig = add_rule_regions(fig, "WBS", True)
+    fig.update_layout(
+        title=f"Field reference Ground {sample_id} ↔ UAV Tree {tree_id}",
+        xaxis_title="Wavelength (nm)",
+        yaxis_title="Reflectance",
+        height=470,
+        legend=dict(orientation="h"),
+    )
+    return fig
+
+
+def plot_field_reference_difference(spectra_df, sample_id, tree_id):
+    if spectra_df is None or spectra_df.empty:
+        return None
+    d = spectra_df.copy()
+    if "GROUND_SAMPLE" in d.columns:
+        d = d[d["GROUND_SAMPLE"].astype(str).eq(str(sample_id))]
+    if "TREE_ID" in d.columns:
+        d = d[pd.to_numeric(d["TREE_ID"], errors="coerce").eq(int(tree_id))]
+    if d.empty or "wavelength_nm" not in d.columns:
+        return None
+    if "uav_minus_ground" in d.columns:
+        delta = pd.to_numeric(d["uav_minus_ground"], errors="coerce")
+    elif {"uav_representative", "ground_interpolated"}.issubset(d.columns):
+        delta = pd.to_numeric(d["uav_representative"], errors="coerce") - pd.to_numeric(d["ground_interpolated"], errors="coerce")
+    else:
+        return None
+    x = pd.to_numeric(d["wavelength_nm"], errors="coerce")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=delta, mode="lines", name="UAV − ground"))
+    fig.add_hline(y=0, line_dash="dash")
+    fig = add_rule_regions(fig, "WBS", True)
+    fig.update_layout(
+        title=f"Reflectance difference — Ground {sample_id} ↔ UAV Tree {tree_id}",
+        xaxis_title="Wavelength (nm)",
+        yaxis_title="UAV − ground reflectance",
+        height=340,
+        showlegend=False,
+    )
+    return fig
+
+
 def relevant_cross_domain_counts(gdf):
     """Cross-domain combinations using conservative structure, without treating missing structure as negative."""
     W = as_bool(gdf["WATER_SUPPORTED"])
@@ -1434,6 +1608,12 @@ if _ALL386_THRESHOLD_PATH is not None:
 spectral_df = load_spectral_data()
 swir_spectral_df = load_swir_spectral_data()
 swir_all_index_df = load_swir_all_index_inventory()
+validation_pkg = load_ground_validation_package()
+validation_pair_df = validation_pkg.get("pair", pd.DataFrame())
+validation_domain_df = validation_pkg.get("domain", pd.DataFrame())
+validation_index_df = validation_pkg.get("index", pd.DataFrame())
+validation_spectra_df = validation_pkg.get("spectra", pd.DataFrame())
+validation_index_long_df = validation_pkg.get("index_long", pd.DataFrame())
 try:
     gdf = merge_geometry_and_rules(geometry_gdf, rule_df)
     if not swir_all_index_df.empty:
@@ -1456,6 +1636,13 @@ view = st.sidebar.radio(
     label_visibility="collapsed",
 )
 st.sidebar.caption("The map highlights only trees that meet the selected supported rule.")
+show_field_validation_trees = False
+if not validation_pair_df.empty:
+    show_field_validation_trees = st.sidebar.checkbox(
+        "Show six field-reference validation trees",
+        value=True,
+        help="Adds a dashed outline around the six fixed ground↔UAV validation trees. It does not change the selected scenario.",
+    )
 
 if view == "GAPS":
     with st.sidebar.expander("Advanced planting-gap settings", expanded=False):
@@ -1539,6 +1726,9 @@ with tab_map:
             ).add_to(m)
     else:
         add_target_layer(m, target_gdf, view)
+
+    if show_field_validation_trees and not validation_pair_df.empty:
+        add_field_validation_layer(m, gdf, validation_pair_df)
 
     folium.LayerControl(collapsed=True).add_to(m)
     st_folium(m, height=650, use_container_width=True)
@@ -1747,27 +1937,187 @@ with tab_summary:
 with tab_validation:
     st.header("Validation & robustness — research view")
     st.caption(
-        "This page tests whether the finalized supported rules are spectrally interpretable, stable to reasonable threshold changes, "
-        "and numerically distinct from valid comparison trees. These are robustness tests, not disease-diagnostic accuracy."
+        "The finalized field-reference validation is loaded from upstream Steps 5–7. "
+        "The app does not recalculate the paired metrics or the production DSS. Scenario robustness below is descriptive and exploratory, not disease-diagnostic accuracy."
     )
 
+    # =====================================================================
+    # A. FINAL FIELD-REFERENCE GROUND ↔ UAV VALIDATION
+    # =====================================================================
+    st.subheader("A. Final field-reference ground ↔ UAV validation")
+
+    if validation_pair_df.empty:
+        st.warning(
+            "Final validation files are not yet in data/. Add the Step 5–7 files listed in the deployment instructions. "
+            "The operational orchard DSS remains available, but the ground↔UAV validation panel cannot be shown."
+        )
+    else:
+        vp = validation_pair_df.copy()
+        vp["TREE_ID"] = pd.to_numeric(vp["TREE_ID"], errors="coerce").astype("Int64")
+        vp["GROUND_SAMPLE"] = vp["GROUND_SAMPLE"].apply(normalize_ground_sample_id)
+
+        n_pairs = int(len(vp))
+        n_compare = int(pd.to_numeric(vp.get("N_INDEX_COMPARISONS"), errors="coerce").sum())
+        n_agree = int(pd.to_numeric(vp.get("N_THRESHOLD_SIDE_AGREEMENTS"), errors="coerce").sum())
+        overall_agree = 100.0 * n_agree / n_compare if n_compare else np.nan
+        mean_r = pd.to_numeric(vp.get("PEARSON_R"), errors="coerce").mean()
+        mean_sam = pd.to_numeric(vp.get("SAM_DEG"), errors="coerce").mean()
+
+        water_pct = np.nan
+        bio_pct = np.nan
+        context_pct = np.nan
+        if not validation_domain_df.empty and {"DOMAIN", "AGREEMENT_PERCENT"}.issubset(validation_domain_df.columns):
+            dd = validation_domain_df.copy()
+            dd["DOMAIN"] = dd["DOMAIN"].astype(str).str.upper()
+            dd["AGREEMENT_PERCENT"] = pd.to_numeric(dd["AGREEMENT_PERCENT"], errors="coerce")
+            if (dd["DOMAIN"] == "WATER").any():
+                water_pct = float(dd.loc[dd["DOMAIN"] == "WATER", "AGREEMENT_PERCENT"].iloc[0])
+            if (dd["DOMAIN"] == "BIOCHEMICAL").any():
+                bio_pct = float(dd.loc[dd["DOMAIN"] == "BIOCHEMICAL", "AGREEMENT_PERCENT"].iloc[0])
+            if (dd["DOMAIN"] == "CONTEXT").any():
+                context_pct = float(dd.loc[dd["DOMAIN"] == "CONTEXT", "AGREEMENT_PERCENT"].iloc[0])
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Fixed pairs", n_pairs)
+        c2.metric("Threshold-side agreement", f"{n_agree}/{n_compare} ({overall_agree:.1f}%)" if n_compare else "NA")
+        c3.metric("Water indicators", f"{water_pct:.1f}%" if np.isfinite(water_pct) else "NA")
+        c4.metric("Biochemical indicators", f"{bio_pct:.1f}%" if np.isfinite(bio_pct) else "NA")
+        c5.metric("Mean Pearson r", f"{mean_r:.3f}" if np.isfinite(mean_r) else "NA")
+
+        st.caption(
+            "Threshold-side agreement is a descriptive cross-sensor comparison, not classification accuracy. "
+            "The six spectra are labelled field-reference spectra because the acquisition chronology encoded in the instrument header has not been independently verified."
+        )
+
+        if np.isfinite(mean_sam):
+            st.caption(f"Mean paired VNIR spectral angle (SAM): {mean_sam:.2f}°. Full paired metrics remain available below.")
+
+        pair_labels = [validation_pair_label(r) for _, r in vp.iterrows()]
+        selected_label = st.selectbox(
+            "Choose one fixed ground ↔ UAV pair",
+            pair_labels,
+            index=0,
+            key="final_ground_uav_pair",
+        )
+        selected_idx = pair_labels.index(selected_label)
+        prow = vp.iloc[selected_idx]
+        sample_id = normalize_ground_sample_id(prow.get("GROUND_SAMPLE"))
+        tree_id = int(prow["TREE_ID"])
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Pearson r", fmt(prow.get("PEARSON_R"), 4))
+        m2.metric("SAM", f"{fmt(prow.get('SAM_DEG'), 2)}°")
+        m3.metric("RMSE", fmt(prow.get("RMSE"), 4))
+        m4.metric("Normalized RMSE", fmt(prow.get("NORMALIZED_RMSE"), 4))
+        m5.metric("REP difference", f"{fmt(prow.get('REP_DIFF_NM'), 2)} nm")
+        m6.metric(
+            "Index-side agreement",
+            f"{int(prow.get('N_THRESHOLD_SIDE_AGREEMENTS', 0))}/{int(prow.get('N_INDEX_COMPARISONS', 0))}",
+        )
+
+        status_cols = [c for c in [
+            "GROUND_SAMPLE", "TREE_ID",
+            "FINAL_UAV_WATER_STATUS", "FINAL_UAV_BIOCHEMICAL_STATUS",
+            "INTERPRETATION_NOTE"
+        ] if c in vp.columns]
+        st.dataframe(vp.iloc[[selected_idx]][status_cols], hide_index=True, use_container_width=True)
+
+        pair_fig = plot_field_reference_pair(validation_spectra_df, sample_id, tree_id)
+        if pair_fig is not None:
+            st.plotly_chart(pair_fig, use_container_width=True)
+            st.caption(
+                "Ground reflectance was interpolated to the actual UAV VNIR wavelength centres in Step 5. "
+                "Shaded sectors are wavelengths used by the finalized Water/Biochemical interpretation framework."
+            )
+            with st.expander("Show UAV − ground reflectance difference", expanded=False):
+                diff_fig = plot_field_reference_difference(validation_spectra_df, sample_id, tree_id)
+                if diff_fig is not None:
+                    st.plotly_chart(diff_fig, use_container_width=True)
+                    st.caption("Positive values indicate higher UAV crown reflectance; negative values indicate higher field-reference reflectance at that wavelength.")
+        else:
+            st.info("The paired Step-5 resampled spectral table is missing for this validation pair.")
+
+        # Final index-level comparison for the selected pair.
+        if not validation_index_long_df.empty:
+            vi = validation_index_long_df.copy()
+            if "GROUND_SAMPLE" in vi.columns:
+                vi["GROUND_SAMPLE"] = vi["GROUND_SAMPLE"].apply(normalize_ground_sample_id)
+            if "TREE_ID" in vi.columns:
+                vi["TREE_ID"] = pd.to_numeric(vi["TREE_ID"], errors="coerce").astype("Int64")
+            sel = vi[
+                vi["GROUND_SAMPLE"].astype(str).eq(str(sample_id))
+                & vi["TREE_ID"].eq(tree_id)
+            ].copy()
+
+            if not sel.empty:
+                sel["Ground threshold side"] = sel.get("GROUND_ANOMALY_FLAG", np.nan).apply(validation_status_text)
+                sel["UAV threshold side"] = sel.get("UAV_ANOMALY_FLAG", np.nan).apply(validation_status_text)
+                sel["Agreement"] = np.where(
+                    pd.to_numeric(sel.get("THRESHOLD_SIDE_AGREEMENT"), errors="coerce").eq(1),
+                    "Agree",
+                    "Different",
+                )
+                sel["Diagnostic wavelength sector"] = sel["INDEX"].map(VALIDATION_INDEX_SECTORS).fillna("")
+
+                show_cols = [c for c in [
+                    "DOMAIN", "INDEX", "Diagnostic wavelength sector", "DIRECTION", "THRESHOLD",
+                    "GROUND_VALUE", "UAV_VALUE", "Ground threshold side", "UAV threshold side", "Agreement"
+                ] if c in sel.columns]
+                st.markdown("#### Index-level paired comparison")
+                st.dataframe(sel[show_cols].round(6), hide_index=True, use_container_width=True)
+
+                implicated = sel[
+                    pd.to_numeric(sel.get("GROUND_ANOMALY_FLAG"), errors="coerce").eq(1)
+                    | pd.to_numeric(sel.get("UAV_ANOMALY_FLAG"), errors="coerce").eq(1)
+                    | pd.to_numeric(sel.get("THRESHOLD_SIDE_AGREEMENT"), errors="coerce").eq(0)
+                ][["INDEX", "DOMAIN", "Diagnostic wavelength sector", "Agreement"]].drop_duplicates()
+
+                if not implicated.empty:
+                    with st.expander("Diagnostic wavelength sectors implicated in this pair", expanded=True):
+                        st.dataframe(implicated, hide_index=True, use_container_width=True)
+                        st.caption(
+                            "These sectors identify where an index falls on an anomalous threshold side or where the field and UAV threshold sides differ. "
+                            "They do not identify a biological cause by themselves."
+                        )
+
+        with st.expander("Show all six fixed validation pairs", expanded=False):
+            pair_cols = [c for c in [
+                "GROUND_SAMPLE", "TREE_ID", "PEARSON_R", "SAM_DEG", "RMSE", "NORMALIZED_RMSE",
+                "DERIVATIVE_R", "GROUND_REP_NM", "UAV_REP_NM", "REP_DIFF_NM",
+                "N_THRESHOLD_SIDE_AGREEMENTS", "N_INDEX_COMPARISONS",
+                "WATER_N_AGREE", "WATER_N_COMPARE", "BIO_N_AGREE", "BIO_N_COMPARE",
+                "INTERPRETATION_NOTE"
+            ] if c in vp.columns]
+            st.dataframe(vp[pair_cols].round(5), hide_index=True, use_container_width=True)
+            if not validation_domain_df.empty:
+                st.markdown("**Domain summary**")
+                st.dataframe(validation_domain_df, hide_index=True, use_container_width=True)
+            if not validation_index_df.empty:
+                st.markdown("**Index-wise summary**")
+                st.dataframe(validation_index_df, hide_index=True, use_container_width=True)
+
+    # =====================================================================
+    # B. CURRENT SCENARIO ROBUSTNESS
+    # =====================================================================
+    st.markdown("---")
+    st.subheader("B. Current scenario robustness")
+
     if view == "GAPS":
-        st.info("Select Water, Biochemical, Low Canopy Stature, Water + Biochemical, or the three-domain scenario to run research validation.")
+        st.info("Scenario robustness applies to Water, Biochemical, Low Canopy Stature, Water + Biochemical, or the three-domain scenario. The field-reference validation above remains independent of the planting-gap tool.")
     else:
         current_mask = target_mask.astype(bool)
         reference_mask = comparison_reference_mask(gdf, view).astype(bool)
 
-        # ---------------------------------------------------------------------
-        # 1. Spectral signature comparison (spectral scenarios only)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 1. Target vs comparison spectral profile
+        # -----------------------------------------------------------------
         if view != "STRUCTURE":
-            st.subheader("1. Target vs comparison spectral profile")
+            st.markdown("### 1. Highlighted vs comparison spectral profile")
             c1, c2 = st.columns(2)
             c1.metric("Highlighted trees", int(current_mask.sum()))
             c2.metric("Comparison trees", int(reference_mask.sum()))
             st.caption("Comparison trees have valid measurements for the selected scenario but do not meet that anomaly rule. They are not labelled 'healthy'.")
 
-            # ---------------------------- VNIR ----------------------------
             st.markdown("#### VNIR spectral profile")
             band_cols = vnir_spectral_columns(spectral_df)
             if not spectral_df.empty and band_cols and current_mask.any() and reference_mask.any():
@@ -1789,11 +2139,9 @@ with tab_validation:
                         st.plotly_chart(fig, use_container_width=True)
 
                         if true_wavelength:
-                            st.caption(f"Shaded VNIR regions are the wavelengths used by the selected rule. Wavelength source: {wl_source or 'resolved mapping'}.")
-                        else:
-                            st.info("VNIR reflectance is available. To show the rule wavelengths on the x-axis, place band_wavelengths.csv in the app data/ folder.")
+                            st.caption(f"Shaded VNIR regions are wavelengths used by the selected rule. Wavelength source: {wl_source or 'resolved mapping'}.")
 
-                        with st.expander("Show VNIR target − comparison difference curve", expanded=False):
+                        with st.expander("Show VNIR highlighted − comparison difference curve", expanded=False):
                             delta = tm - rm
                             dfig = go.Figure()
                             dfig.add_trace(go.Scatter(x=x, y=delta, mode="lines", name="Highlighted − Comparison", connectgaps=False))
@@ -1801,7 +2149,10 @@ with tab_validation:
                             dfig = add_rule_regions(dfig, view, true_wavelength)
                             dfig.update_layout(
                                 title="VNIR reflectance difference",
-                                xaxis_title=x_title, yaxis_title="Highlighted − comparison reflectance", height=320, showlegend=False
+                                xaxis_title=x_title,
+                                yaxis_title="Highlighted − comparison reflectance",
+                                height=320,
+                                showlegend=False,
                             )
                             st.plotly_chart(dfig, use_container_width=True)
                             st.caption("Positive values mean the highlighted-tree mean reflectance is higher; negative values mean it is lower at that wavelength.")
@@ -1813,27 +2164,15 @@ with tab_validation:
                         m2.metric("VNIR spectral RMSE", f"{rms:.5f}" if np.isfinite(rms) else "NA")
                     else:
                         st.info("No VNIR spectra overlap both the highlighted and comparison groups.")
-                else:
-                    st.info("The VNIR spectrum table has no tree identifier that can be safely matched to the final database.")
+                # Intentionally no generic identifier-mismatch message in the final validation page.
             else:
                 st.info("Complete VNIR spectra are unavailable, or one comparison group is empty.")
 
-            # ---------------------------- SWIR ----------------------------
             if view in {"WATER", "WB", "WBS"}:
                 st.markdown("#### SWIR water-sensitive spectral profile")
                 swir_cols = swir_spectral_columns(swir_spectral_df)
                 if not swir_spectral_df.empty and swir_cols and "tree_id" in swir_spectral_df.columns and current_mask.any() and reference_mask.any():
                     swir_validation_df = swir_spectral_df.copy()
-
-                    # Complete all-tree spectra are retained for descriptive visualization.
-                    # Measurement support (multi-strip vs single-strip / strict consensus)
-                    # is provenance, not a reason to hide a legitimate tree spectrum.
-                    if "USE_FOR_WATER_VALIDATION" in swir_validation_df.columns:
-                        # Legacy files may explicitly define validation eligibility.
-                        # For the complete ALL-386 inventory we keep all spectra and
-                        # display this flag as provenance instead of filtering them out.
-                        pass
-
                     target_tree_ids = set(gdf.loc[current_mask, "tree_id"].tolist())
                     reference_tree_ids = set(gdf.loc[reference_mask, "tree_id"].tolist())
                     ts = swir_validation_df[swir_validation_df["tree_id"].isin(target_tree_ids)].copy()
@@ -1854,13 +2193,7 @@ with tab_validation:
                         st.plotly_chart(sfig, use_container_width=True)
                         st.caption("The shaded SWIR bands are the actual Headwall band centres used in the final water rule: 1097.940, 1224.040, 2202.750 and 2262.790 nm.")
 
-                        band_table = pd.DataFrame([
-                            ["NDMI2", "R2200 and R1100", "2202.750 nm and 1097.940 nm"],
-                            ["NDSI-RWC", "R1222 and R2264", "1224.040 nm and 2262.790 nm"],
-                        ], columns=["Water indicator", "Reflectance bands", "Actual Headwall centres"])
-                        st.dataframe(band_table, hide_index=True, use_container_width=True)
-
-                        with st.expander("Show SWIR target − comparison difference curve", expanded=False):
+                        with st.expander("Show SWIR highlighted − comparison difference curve", expanded=False):
                             sdelta = stm - srm
                             sdfig = go.Figure()
                             sdfig.add_trace(go.Scatter(x=swir_x, y=sdelta, mode="lines", name="Highlighted − Comparison", connectgaps=False))
@@ -1882,136 +2215,31 @@ with tab_validation:
                         s1.metric("SWIR spectral angle (SAM)", f"{ssam:.3f}°" if np.isfinite(ssam) else "NA")
                         s2.metric("SWIR spectral RMSE", f"{srms:.5f}" if np.isfinite(srms) else "NA")
                     else:
-                        st.info("SWIR spectra are loaded, but the current highlighted/comparison groups do not both contain usable spectra.")
+                        st.info("SWIR spectra are loaded, but the highlighted/comparison groups do not both contain usable spectra.")
                 else:
-                    st.info(
-                        "Complete SWIR reflectance could not be located. Expected SWIR_spectra_indices_ALL_386.csv in data/ "
-                        "or in D:\\hx_UAV_data_processing\\object_based_tree_swir\\ALL_386_FINAL."
-                    )
+                    st.info("Complete SWIR reflectance is unavailable for the current deployment.")
 
-            # -------------------------------------------------------------
-            # Individual-tree full-spectrum explorer
-            # -------------------------------------------------------------
-            st.markdown("#### Individual-tree VNIR + SWIR spectral explorer")
-            st.caption(
-                "Select any mapped tree to inspect its representative full spectrum. "
-                "These spectra are descriptive visualization products; final rule classification "
-                "continues to use the harmonized pixel-wise VNIR indices and finalized SWIR indices."
-            )
-
-            tree_choices = sorted(pd.to_numeric(gdf["tree_id"], errors="coerce").dropna().astype(int).unique().tolist())
-            if tree_choices:
-                default_tree = int(gdf.loc[current_mask, "tree_id"].iloc[0]) if current_mask.any() else tree_choices[0]
-                try:
-                    default_idx = tree_choices.index(default_tree)
-                except ValueError:
-                    default_idx = 0
-
-                selected_tree = st.selectbox(
-                    "Select Tree ID",
-                    tree_choices,
-                    index=default_idx,
-                    key=f"spectral_tree_{view}",
-                )
-
-                info_cols = [c for c in [
-                    "tree_id", "WATER_EVIDENCE_STATUS", "WATER_MEASUREMENT_CONFIDENCE",
-                    "BIOCHEMICAL_STATUS", "STRUCTURE_STATUS_FINAL"
-                ] if c in gdf.columns]
-                selected_info = gdf.loc[gdf["tree_id"].eq(selected_tree), info_cols]
-                if not selected_info.empty:
-                    st.dataframe(selected_info, hide_index=True, use_container_width=True)
-
-                # VNIR individual tree
-                vcols = vnir_spectral_columns(spectral_df)
-                vkey = (
-                    "tree_id" if "tree_id" in spectral_df.columns
-                    else "generated_id" if "generated_id" in spectral_df.columns
-                    else None
-                )
-                if vkey and vcols:
-                    vv = spectral_df[pd.to_numeric(spectral_df[vkey], errors="coerce").eq(selected_tree)]
-                    if not vv.empty:
-                        vx, vx_title, vtrue, _ = spectral_axis_from_mapping(vcols)
-                        vy = vv.iloc[0][vcols].apply(pd.to_numeric, errors="coerce").to_numpy(float)
-                        vfig = go.Figure()
-                        vfig.add_trace(go.Scatter(
-                            x=vx, y=vy, mode="lines",
-                            name=f"Tree {selected_tree} VNIR",
-                            connectgaps=False
-                        ))
-                        vfig = add_rule_regions(vfig, view, vtrue)
-                        vfig.update_layout(
-                            title=f"Tree {selected_tree} — VNIR reflectance spectrum",
-                            xaxis_title=vx_title,
-                            yaxis_title="Reflectance",
-                            height=390,
-                        )
-                        st.plotly_chart(vfig, use_container_width=True)
-                    else:
-                        st.info(f"No VNIR spectrum found for Tree {selected_tree}.")
-
-                # SWIR individual tree
-                scols = swir_spectral_columns(swir_spectral_df)
-                if scols and "tree_id" in swir_spectral_df.columns:
-                    ss = swir_spectral_df[
-                        pd.to_numeric(swir_spectral_df["tree_id"], errors="coerce").eq(selected_tree)
-                    ]
-                    if not ss.empty:
-                        sx = np.asarray([numeric_suffix(c) for c in scols], dtype=float)
-                        sy = ss.iloc[0][scols].apply(pd.to_numeric, errors="coerce").to_numpy(float)
-                        sfig_tree = go.Figure()
-                        sfig_tree.add_trace(go.Scatter(
-                            x=sx, y=sy, mode="lines",
-                            name=f"Tree {selected_tree} SWIR",
-                            connectgaps=False
-                        ))
-                        sfig_tree = add_swir_water_regions(sfig_tree)
-                        sfig_tree.update_layout(
-                            title=f"Tree {selected_tree} — SWIR reflectance spectrum",
-                            xaxis_title="Wavelength (nm)",
-                            yaxis_title="Reflectance",
-                            height=390,
-                        )
-                        st.plotly_chart(sfig_tree, use_container_width=True)
-
-                        provenance = []
-                        for c in [
-                            "SWIR_SPECTRUM_STATUS", "SPECTRUM_STATUS",
-                            "N_USABLE_SWIR_STRIPS", "USABLE_SWIR_STRIPS",
-                            "SWIR_CONFIDENCE"
-                        ]:
-                            if c in ss.columns and pd.notna(ss.iloc[0].get(c)):
-                                provenance.append([c, ss.iloc[0].get(c)])
-                        if provenance:
-                            st.dataframe(
-                                pd.DataFrame(provenance, columns=["SWIR provenance field", "Value"]),
-                                hide_index=True, use_container_width=True
-                            )
-                    else:
-                        st.info(f"No SWIR spectrum found for Tree {selected_tree}.")
-
-                st.caption(
-                    "Interpret spectral departures together with the index rules, acquisition/QC provenance, "
-                    "and field measurements. A spectral difference alone does not identify the biological cause."
-                )
-
-        # ---------------------------------------------------------------------
-        # Threshold sensitivity / Jaccard
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 2. Threshold sensitivity / Jaccard
+        # -----------------------------------------------------------------
         threshold_section = 1 if view == "STRUCTURE" else 2
         values_section = 2 if view == "STRUCTURE" else 3
         overlap_section = 3 if view == "STRUCTURE" else 4
         advanced_section = 4 if view == "STRUCTURE" else 5
-        ground_section = 5 if view == "STRUCTURE" else 6
-        st.subheader(f"{threshold_section}. Threshold robustness")
+
+        st.markdown(f"### {threshold_section}. Threshold robustness")
         st.write("The operational classification uses **frozen P25-derived orchard-relative thresholds**. They are not universal citrus hard thresholds. Robustness is tested by repeating the same logic with P20 and P30 alternatives derived from the same QC-approved orchard population.")
         schemes = ["P20", "P25", "P30"]
         runs = {s: sensitivity_target_mask(gdf, view, s) for s in schemes}
-        sens = pd.DataFrame({"Threshold scheme": ["P20 (stricter)", "P25 (operational)", "P30 (more inclusive)"],
-                             "Highlighted trees": [int(runs[s].sum()) for s in schemes]})
-        st.plotly_chart(px.bar(sens, x="Threshold scheme", y="Highlighted trees", text="Highlighted trees",
-                               title="How many trees are retained when the percentile-derived threshold moves"), use_container_width=True)
+        sens = pd.DataFrame({
+            "Threshold scheme": ["P20 (stricter)", "P25 (operational)", "P30 (more inclusive)"],
+            "Highlighted trees": [int(runs[s].sum()) for s in schemes],
+        })
+        st.plotly_chart(
+            px.bar(sens, x="Threshold scheme", y="Highlighted trees", text="Highlighted trees",
+                   title="How many trees are retained when the percentile-derived threshold moves"),
+            use_container_width=True,
+        )
 
         jac = pd.DataFrame(index=schemes, columns=schemes, dtype=float)
         for i in schemes:
@@ -2021,18 +2249,17 @@ with tab_validation:
         j1.metric("P20 ↔ P25 Jaccard", f"{jac.loc['P20','P25']:.3f}" if np.isfinite(jac.loc['P20','P25']) else "NA")
         j2.metric("P25 ↔ P30 Jaccard", f"{jac.loc['P25','P30']:.3f}" if np.isfinite(jac.loc['P25','P30']) else "NA")
         st.caption("Jaccard = overlap of the selected tree sets: 1.0 means identical sets; lower values mean stronger sensitivity to threshold choice.")
-        with st.expander("Show full Jaccard matrix and the P20/P25/P30 threshold values"):
+        with st.expander("Show full Jaccard matrix and P20/P25/P30 threshold values"):
             st.dataframe(jac.round(3), use_container_width=True)
             st.dataframe(threshold_table_for_view(view), hide_index=True, use_container_width=True)
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 3. Target vs comparison values
-        # ---------------------------------------------------------------------
-        st.subheader(f"{values_section}. Target vs comparison values")
+        # -----------------------------------------------------------------
+        st.markdown(f"### {values_section}. Highlighted vs comparison indicator values")
         st.write(
-            "Two views are shown for the selected indicator: a box plot for the overall group distribution and an individual-tree point plot. "
-            "In the box plot, the line inside each box is the median, the box contains the middle 50% of values, and the whiskers show the broader spread. "
-            "The point plot shows every tree separately. The dashed line is the operational threshold when one is defined."
+            "The box plot summarizes the two groups and the point plot shows individual trees. "
+            "The dashed line is the operational threshold when defined."
         )
         metrics = [m for m in scenario_metrics(view) if m in gdf.columns]
         if metrics and current_mask.any() and reference_mask.any():
@@ -2043,43 +2270,36 @@ with tab_validation:
                 target_label = "Low canopy stature" if view == "STRUCTURE" else "Highlighted"
                 left_plot, right_plot = st.columns(2)
                 with left_plot:
-                    fig = comparison_box_plot(
-                        target_vals,
-                        ref_vals,
-                        choice,
-                        target_label,
-                        "Comparison",
-                        f"{choice}: distribution summary",
+                    st.plotly_chart(
+                        comparison_box_plot(target_vals, ref_vals, choice, target_label, "Comparison", f"{choice}: distribution summary"),
+                        use_container_width=True,
                     )
-                    st.plotly_chart(fig, use_container_width=True)
                 with right_plot:
-                    pfig = comparison_point_plot(
-                        gdf.loc[current_mask, [c for c in ["tree_id", choice] if c in gdf.columns]].copy(),
-                        gdf.loc[reference_mask, [c for c in ["tree_id", choice] if c in gdf.columns]].copy(),
-                        choice,
-                        target_label,
-                        "Comparison",
-                        f"{choice}: individual-tree values",
+                    st.plotly_chart(
+                        comparison_point_plot(
+                            gdf.loc[current_mask, [c for c in ["tree_id", choice] if c in gdf.columns]].copy(),
+                            gdf.loc[reference_mask, [c for c in ["tree_id", choice] if c in gdf.columns]].copy(),
+                            choice, target_label, "Comparison", f"{choice}: individual-tree values",
+                        ),
+                        use_container_width=True,
                     )
-                    st.plotly_chart(pfig, use_container_width=True)
-                st.caption("Left: box plot summarizes the group distribution. Right: each point is one tree; hover a point to see its Tree ID. The dashed line is the operational threshold when defined.")
             stats_df = comparison_statistics(gdf, current_mask, reference_mask, metrics)
             with st.expander("Research statistics for all indicators"):
                 if not stats_df.empty:
                     st.dataframe(stats_df.round(5), hide_index=True, use_container_width=True)
-                    st.caption("Mann–Whitney p tests distributional difference; rank-biserial gives effect direction/size. These do not establish causality.")
+                    st.caption("Mann–Whitney p and rank-biserial statistics describe group separation; they do not establish causality or diagnostic accuracy.")
                 else:
                     st.info("Not enough observations for group statistics.")
         else:
             st.info("Not enough observations for indicator comparison.")
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 4. Height / structure overlap
-        # ---------------------------------------------------------------------
-        st.subheader(f"{overlap_section}. Height / structure overlap")
+        # -----------------------------------------------------------------
+        st.markdown(f"### {overlap_section}. Height / structure overlap")
         S_supported = supported_structure_mask(gdf)
         if view == "STRUCTURE":
-            st.info("Every highlighted tree in this scenario already meets the conservative dual-measurement low-stature rule, so no additional raster-support category is needed.")
+            st.info("Every highlighted tree already meets the conservative LAS + raster-CHM low-stature rule.")
         elif view == "WB":
             st.info("This two-domain view is Water + Biochemical without the conservative low-canopy-stature result.")
         else:
@@ -2087,18 +2307,20 @@ with tab_validation:
             c1, c2 = st.columns(2)
             c1.metric("Highlighted trees", int(current_mask.sum()))
             c2.metric("Also low canopy stature", int(overlap.sum()))
-            st.caption("This is a cross-domain overlap check: it shows how often the selected spectral finding co-occurs with the conservative structural finding. It does not identify cause.")
+            st.caption("This is cross-domain co-occurrence. It does not identify cause.")
 
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 5. Advanced research analysis
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
         with st.expander(f"{advanced_section}. Advanced research analysis — PCA and spatial coherence", expanded=False):
             st.markdown("**PCA feature-space comparison**")
             features = scenario_metrics("WBS")
             pca_df, explained, used = pca_feature_space(gdf, features, current_mask, reference_mask)
             if not pca_df.empty:
-                fig = px.scatter(pca_df, x="PC1", y="PC2", color="Group", hover_data=["tree_id"],
-                                 title=f"PCA feature space — PC1 {explained[0]:.1f}%, PC2 {explained[1]:.1f}%")
+                fig = px.scatter(
+                    pca_df, x="PC1", y="PC2", color="Group", hover_data=["tree_id"],
+                    title=f"PCA feature space — PC1 {explained[0]:.1f}%, PC2 {explained[1]:.1f}%",
+                )
                 st.plotly_chart(fig, use_container_width=True)
                 st.caption("Exploratory only: separation indicates multivariate feature-space distinction, not biological class identity.")
                 with st.expander("Features used in PCA"):
@@ -2117,12 +2339,6 @@ with tab_validation:
             else:
                 st.info("Spatial coherence requires a non-trivial mix of highlighted and non-highlighted trees.")
 
-        # ---------------------------------------------------------------------
-        # 6. Ground validation placeholder
-        # ---------------------------------------------------------------------
-        st.subheader(f"{ground_section}. Ground spectroradiometer validation")
-        st.info("Ground spectroradiometer validation will be added in the next step using your actual processed SVC/XHR field spectra and tree mapping. No generic ground-data assumptions are applied in this version.")
-
 
 with tab_methods:
     st.header("How the system decides")
@@ -2134,6 +2350,17 @@ with tab_methods:
 
 **Spectral validation display** — VNIR and SWIR consensus curves are descriptive validation layers only. SWIR water-rule bands are shown at their exact Headwall centres; spectral curves do not create additional classification votes.
     """)
+
+    st.subheader("Field-reference validation")
+    st.write(
+        "Six fixed field-reference spectra are paired with six UAV tree crowns using the finalized mapping. "
+        "Full-spectrum metrics (Pearson r, SAM, RMSE, normalized RMSE, derivative correlation and REP difference) are read from the Step-5 validation products. "
+        "Index-level comparisons use the finalized P25 thresholds and are reported as threshold-side agreement, not classification accuracy. "
+        "The application does not recompute these validation results."
+    )
+    st.info(
+        "Until the field spectroradiometer clock/date is independently reconciled with the UAV acquisition chronology, the app uses the term 'field-reference spectra' rather than 'same-day ground truth'."
+    )
 
     st.subheader("Operational thresholds")
     st.info("These are frozen **P25-derived orchard-relative thresholds** calculated from the complete 386-tree reference population using the harmonized final estimators. They are operational screening thresholds for this dataset, not universal citrus hard thresholds.")
