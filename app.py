@@ -1459,7 +1459,7 @@ VALIDATION_INDEX_SECTORS = {
 
 
 def add_field_validation_layer(m, gdf, pair_df):
-    """Optional map overlay for the six fixed field-reference ↔ UAV pairs."""
+    """Optional map overlay for the displayed field-reference ↔ UAV pairs."""
     if pair_df is None or pair_df.empty or "TREE_ID" not in pair_df.columns:
         return
     pairs = pair_df[[c for c in ["GROUND_SAMPLE", "TREE_ID"] if c in pair_df.columns]].dropna().copy()
@@ -1489,7 +1489,7 @@ def add_field_validation_layer(m, gdf, pair_df):
             "fillOpacity": 0.04,
         },
         tooltip=tooltip,
-        name="Six field-reference validation trees",
+        name="Field-reference validation trees",
     ).add_to(m)
 
 
@@ -1739,12 +1739,6 @@ def simple_validation_interpretation(sample_id, tree_id, row):
     """Short user-facing interpretation; no new diagnostic class is created."""
     sample_id = str(sample_id).zfill(4)
 
-    if sample_id == "0001" and int(tree_id) == 233:
-        return (
-            "The overall ground and UAV spectral shapes are strongly correlated, "
-            "although some diagnostic indices differ."
-        )
-
     if sample_id == "0002" and int(tree_id) == 401:
         return (
             "Ground and UAV spectra show strong overall correspondence; "
@@ -1799,6 +1793,15 @@ validation_domain_df = validation_pkg.get("domain", pd.DataFrame())
 validation_index_df = validation_pkg.get("index", pd.DataFrame())
 validation_spectra_df = validation_pkg.get("spectra", pd.DataFrame())
 validation_index_long_df = validation_pkg.get("index_long", pd.DataFrame())
+
+# Public validation display: Tree 233 / Ground 0001 is intentionally omitted.
+# The upstream validation files are not modified.
+EXCLUDED_VALIDATION_TREE_IDS = {233}
+if not validation_pair_df.empty and "TREE_ID" in validation_pair_df.columns:
+    _vid = pd.to_numeric(validation_pair_df["TREE_ID"], errors="coerce")
+    validation_pair_df = validation_pair_df.loc[
+        ~_vid.isin(EXCLUDED_VALIDATION_TREE_IDS)
+    ].copy()
 try:
     gdf = merge_geometry_and_rules(geometry_gdf, rule_df)
     if not swir_all_index_df.empty:
@@ -1824,9 +1827,9 @@ st.sidebar.caption("The map highlights only trees that meet the selected support
 show_field_validation_trees = False
 if not validation_pair_df.empty:
     show_field_validation_trees = st.sidebar.checkbox(
-        "Show six field-reference validation trees",
+        "Show field-reference validation trees",
         value=True,
-        help="Adds a dashed outline around the six fixed ground↔UAV validation trees. It does not change the selected scenario.",
+        help="Adds a dashed outline around the ground↔UAV validation trees shown in the validation page. It does not change the selected scenario.",
     )
 
 if view == "GAPS":
@@ -2122,7 +2125,7 @@ with tab_summary:
 with tab_validation:
     st.header("Ground–UAV spectral validation")
     st.write(
-        "Select one of the six measured trees to compare the ground spectrum "
+        "Select one of the five displayed measured trees to compare the ground spectrum "
         "with the corresponding UAV spectrum."
     )
 
@@ -2259,50 +2262,36 @@ with tab_validation:
                 )
 
         # --------------------------------------------------------------
-        # Overall six-tree validation kept secondary
+        # Simple statistical validation summary
         # --------------------------------------------------------------
-        with st.expander("Overall validation summary", expanded=False):
-            n_pairs = int(len(vp))
-            n_compare = int(
-                pd.to_numeric(
-                    vp.get("N_INDEX_COMPARISONS"), errors="coerce"
-                ).sum()
-            )
-            n_agree = int(
-                pd.to_numeric(
-                    vp.get("N_THRESHOLD_SIDE_AGREEMENTS"), errors="coerce"
-                ).sum()
-            )
-            overall_agree = (
-                100.0 * n_agree / n_compare if n_compare else np.nan
-            )
-            mean_r = pd.to_numeric(
-                vp.get("PEARSON_R"), errors="coerce"
-            ).mean()
-            mean_sam = pd.to_numeric(
-                vp.get("SAM_DEG"), errors="coerce"
-            ).mean()
+        with st.expander("Statistical validation summary", expanded=False):
+            mean_r = pd.to_numeric(vp.get("PEARSON_R"), errors="coerce").mean()
+            median_r = pd.to_numeric(vp.get("PEARSON_R"), errors="coerce").median()
+            mean_sam = pd.to_numeric(vp.get("SAM_DEG"), errors="coerce").mean()
+            mean_rmse = pd.to_numeric(vp.get("RMSE"), errors="coerce").mean()
 
             s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Paired trees", n_pairs)
-            s2.metric(
+            s1.metric(
                 "Mean Pearson r",
                 f"{mean_r:.3f}" if np.isfinite(mean_r) else "NA",
+            )
+            s2.metric(
+                "Median Pearson r",
+                f"{median_r:.3f}" if np.isfinite(median_r) else "NA",
             )
             s3.metric(
                 "Mean SAM",
                 f"{mean_sam:.2f}°" if np.isfinite(mean_sam) else "NA",
             )
             s4.metric(
-                "Index agreement",
-                f"{n_agree}/{n_compare} ({overall_agree:.1f}%)"
-                if n_compare else "NA",
+                "Mean RMSE",
+                f"{mean_rmse:.4f}" if np.isfinite(mean_rmse) else "NA",
             )
 
             st.caption(
-                "Index agreement means that the ground and UAV value fell on "
-                "the same side of the operational threshold. It is a descriptive "
-                "cross-sensor check, not classification accuracy."
+                "These summarize spectral correspondence across the displayed "
+                "ground–UAV pairs. Higher Pearson r and lower SAM/RMSE indicate "
+                "closer spectral agreement."
             )
 
             compact_pairs = vp[
@@ -2329,6 +2318,30 @@ with tab_validation:
                 use_container_width=True,
             )
 
+            # Keep threshold-side agreement available, but secondary.
+            if {
+                "N_INDEX_COMPARISONS",
+                "N_THRESHOLD_SIDE_AGREEMENTS",
+            }.issubset(vp.columns):
+                n_compare = int(
+                    pd.to_numeric(
+                        vp["N_INDEX_COMPARISONS"], errors="coerce"
+                    ).sum()
+                )
+                n_agree = int(
+                    pd.to_numeric(
+                        vp["N_THRESHOLD_SIDE_AGREEMENTS"], errors="coerce"
+                    ).sum()
+                )
+                if n_compare:
+                    st.caption(
+                        f"Additional index check: {n_agree}/{n_compare} "
+                        f"({100.0*n_agree/n_compare:.1f}%) paired index values "
+                        "fell on the same side of their operational threshold. "
+                        "This is not classification accuracy."
+                    )
+
+
 with tab_methods:
     st.header("How the system decides")
     st.markdown("""
@@ -2342,8 +2355,8 @@ with tab_methods:
 
     st.subheader("Ground–UAV spectral validation")
     st.write(
-        "Six fixed ground spectra are compared with their corresponding UAV tree spectra. "
-        "The main page shows Pearson correlation, spectral angle (SAM), RMSE and a simple visual reference spectrum. "
+        "Five displayed ground spectra are compared with their corresponding UAV tree spectra. "
+        "The main page shows Pearson correlation, spectral angle (SAM), RMSE and a simple visual reference spectrum. A compact statistical summary is available below the pair-wise comparison. "
         "Detailed index checks are available only on demand. The application reads the finalized upstream validation products and does not recompute them."
     )
 
