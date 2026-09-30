@@ -1767,6 +1767,113 @@ def relevant_cross_domain_counts(gdf):
 
 
 
+
+def _q(series, q):
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    return float(s.quantile(q)) if len(s) else np.nan
+
+
+def bootstrap_p25_stability(df, view, n_boot=300, seed=42):
+    """
+    Bootstrap stability of the orchard-relative P25 rule.
+
+    For each bootstrap resample:
+      1) resample the orchard rows with replacement,
+      2) re-estimate the directional P25 thresholds,
+      3) apply those thresholds back to the full orchard,
+      4) compare the selected-tree set with the operational P25 set using Jaccard.
+
+    This evaluates sampling stability of the threshold-based rule.
+    """
+    if df is None or len(df) < 10:
+        return pd.DataFrame(), pd.Series(dtype=bool)
+
+    baseline = sensitivity_target_mask(df, view, "P25").astype(bool)
+
+    # Full-orchard values to which every bootstrap threshold set is applied.
+    def num(col):
+        return pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series(np.nan, index=df.index)
+
+    WBI = num("WBI_VALUE")
+    NDMI = num("NDMI2_VALUE")
+    NDSI = num("NDSI_RWC_VALUE")
+
+    NDRE = num("NDRE_VALUE")
+    CI = num("CIRED_EDGE_VALUE")
+    REP = num("REP_D1_NM_VALUE")
+    PSRI = num("PSRI_VALUE")
+    SIPI = num("SIPI_VALUE")
+
+    H95 = num("H_P95_m")
+    R95 = num("RASTER_CHM_P95_m")
+    structure_assessable = H95.notna() & R95.notna()
+
+    rng = np.random.default_rng(seed)
+    n = len(df)
+    rows = []
+
+    for b in range(int(n_boot)):
+        idx = rng.integers(0, n, size=n)
+        boot = df.iloc[idx]
+
+        # Directional P25 thresholds:
+        # low-tail indicators use Q25; high-tail indicators use Q75.
+        wbi_thr = _q(boot.get("WBI_VALUE", pd.Series(dtype=float)), 0.25)
+        ndmi_thr = _q(boot.get("NDMI2_VALUE", pd.Series(dtype=float)), 0.75)
+        ndsi_thr = _q(boot.get("NDSI_RWC_VALUE", pd.Series(dtype=float)), 0.25)
+
+        ndre_thr = _q(boot.get("NDRE_VALUE", pd.Series(dtype=float)), 0.25)
+        ci_thr = _q(boot.get("CIRED_EDGE_VALUE", pd.Series(dtype=float)), 0.25)
+        rep_thr = _q(boot.get("REP_D1_NM_VALUE", pd.Series(dtype=float)), 0.25)
+        psri_thr = _q(boot.get("PSRI_VALUE", pd.Series(dtype=float)), 0.75)
+        sipi_thr = _q(boot.get("SIPI_VALUE", pd.Series(dtype=float)), 0.75)
+
+        h95_thr = _q(boot.get("H_P95_m", pd.Series(dtype=float)), 0.25)
+        r95_thr = _q(boot.get("RASTER_CHM_P95_m", pd.Series(dtype=float)), 0.25)
+
+        W = (
+            WBI.notna() & NDMI.notna() & NDSI.notna()
+            & (WBI <= wbi_thr)
+            & (NDMI >= ndmi_thr)
+            & (NDSI <= ndsi_thr)
+        )
+
+        B = (
+            NDRE.notna() & CI.notna() & REP.notna() & PSRI.notna() & SIPI.notna()
+            & (NDRE <= ndre_thr)
+            & (CI <= ci_thr)
+            & (REP <= rep_thr)
+            & (PSRI >= psri_thr)
+            & (SIPI >= sipi_thr)
+        )
+
+        S = (
+            structure_assessable
+            & (H95 <= h95_thr)
+            & (R95 <= r95_thr)
+        )
+
+        if view == "WATER":
+            selected = W
+        elif view == "BIOCHEMICAL":
+            selected = B
+        elif view == "STRUCTURE":
+            selected = S
+        elif view == "WB":
+            selected = W & B & structure_assessable & ~S
+        elif view == "WBS":
+            selected = W & B & S
+        else:
+            selected = pd.Series(False, index=df.index)
+
+        rows.append({
+            "Bootstrap": b + 1,
+            "Selected trees": int(selected.sum()),
+            "Jaccard vs operational P25": jaccard(baseline, selected),
+        })
+
+    return pd.DataFrame(rows), baseline
+
 # =============================================================================
 # 8. APP LOAD / CONTROLS
 # =============================================================================
@@ -2345,9 +2452,9 @@ with tab_validation:
     st.divider()
     st.header("2. Statistical robustness")
     st.caption(
-        "This section checks whether the UAV rule-based groups remain stable "
-        "when thresholds move slightly, and whether highlighted trees differ "
-        "statistically from valid comparison trees."
+        "This section checks whether the operational P25 rule remains stable under "
+        "bootstrap resampling, and describes how strongly highlighted trees differ "
+        "from valid comparison trees."
     )
 
     if view == "GAPS":
@@ -2362,65 +2469,82 @@ with tab_validation:
         # ----------------------------------------------------------
         # A. Threshold stability / Jaccard
         # ----------------------------------------------------------
-        st.subheader("Threshold stability")
+        st.subheader("Rule stability — bootstrap P25")
 
-        schemes = ["P20", "P25", "P30"]
-        runs = {s: sensitivity_target_mask(gdf, view, s) for s in schemes}
-
-        count_p20 = int(runs["P20"].sum())
-        count_p25 = int(runs["P25"].sum())
-        count_p30 = int(runs["P30"].sum())
-
-        j20_25 = jaccard(runs["P20"], runs["P25"])
-        j25_30 = jaccard(runs["P25"], runs["P30"])
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("P20 trees", count_p20)
-        c2.metric("P25 trees", count_p25)
-        c3.metric("P30 trees", count_p30)
-        c4.metric(
-            "Jaccard P20↔P25",
-            f"{j20_25:.3f}" if np.isfinite(j20_25) else "NA",
-        )
-        c5.metric(
-            "Jaccard P25↔P30",
-            f"{j25_30:.3f}" if np.isfinite(j25_30) else "NA",
+        boot_df, operational_mask = bootstrap_p25_stability(
+            gdf,
+            view,
+            n_boot=300,
+            seed=42,
         )
 
-        st.caption(
-            "P25 is the operational rule. P20 and P30 are stricter/more-inclusive "
-            "sensitivity checks. Jaccard = 1 means the selected tree sets are identical; "
-            "lower values mean greater sensitivity to threshold choice."
-        )
+        if boot_df.empty:
+            st.info("Bootstrap stability could not be calculated for this scenario.")
+        else:
+            jvals = pd.to_numeric(
+                boot_df["Jaccard vs operational P25"], errors="coerce"
+            ).dropna()
+            counts = pd.to_numeric(
+                boot_df["Selected trees"], errors="coerce"
+            ).dropna()
 
-        stability_df = pd.DataFrame(
-            {
-                "Threshold": ["P20", "P25 operational", "P30"],
-                "Highlighted trees": [count_p20, count_p25, count_p30],
-            }
-        )
-        st.plotly_chart(
-            px.bar(
-                stability_df,
-                x="Threshold",
-                y="Highlighted trees",
-                text="Highlighted trees",
-                title="Trees retained under nearby threshold choices",
-            ),
-            use_container_width=True,
-        )
+            operational_n = int(operational_mask.sum())
+            median_count = float(counts.median()) if len(counts) else np.nan
+            count_lo = float(counts.quantile(0.05)) if len(counts) else np.nan
+            count_hi = float(counts.quantile(0.95)) if len(counts) else np.nan
 
-        with st.expander("Show exact P20 / P25 / P30 threshold values", expanded=False):
-            st.dataframe(
-                threshold_table_for_view(view),
-                hide_index=True,
-                use_container_width=True,
+            median_j = float(jvals.median()) if len(jvals) else np.nan
+            j_lo = float(jvals.quantile(0.05)) if len(jvals) else np.nan
+            j_hi = float(jvals.quantile(0.95)) if len(jvals) else np.nan
+
+            b1, b2, b3 = st.columns(3)
+            b1.metric("Operational P25 trees", operational_n)
+            b2.metric(
+                "Bootstrap median trees",
+                f"{median_count:.0f}" if np.isfinite(median_count) else "NA",
             )
+            b3.metric(
+                "Median Jaccard",
+                f"{median_j:.3f}" if np.isfinite(median_j) else "NA",
+            )
+
+            if np.isfinite(count_lo) and np.isfinite(count_hi):
+                st.caption(
+                    f"Across 300 bootstrap resamples, the middle 90% of selected-tree "
+                    f"counts was {count_lo:.0f}–{count_hi:.0f}. "
+                    f"The middle 90% of Jaccard overlap with the operational P25 result "
+                    f"was {j_lo:.3f}–{j_hi:.3f}."
+                )
+
+            st.caption(
+                "Each bootstrap run resamples the orchard, re-estimates the P25 "
+                "thresholds, and reapplies the same rule to the full orchard. "
+                "Higher Jaccard means the selected-tree set is more stable to sampling variation."
+            )
+
+            with st.expander("Show bootstrap distributions", expanded=False):
+                left, right = st.columns(2)
+                with left:
+                    fig_count = px.histogram(
+                        boot_df,
+                        x="Selected trees",
+                        nbins=20,
+                        title="Bootstrap distribution of selected-tree count",
+                    )
+                    st.plotly_chart(fig_count, use_container_width=True)
+                with right:
+                    fig_j = px.histogram(
+                        boot_df,
+                        x="Jaccard vs operational P25",
+                        nbins=20,
+                        title="Bootstrap distribution of Jaccard overlap",
+                    )
+                    st.plotly_chart(fig_j, use_container_width=True)
 
         # ----------------------------------------------------------
         # B. Mann–Whitney U + rank-biserial effect size
         # ----------------------------------------------------------
-        st.subheader("Highlighted vs comparison trees")
+        st.subheader("Group separation — Mann–Whitney and effect size")
 
         metrics = [m for m in scenario_metrics(view) if m in gdf.columns]
         stats_df = comparison_statistics(
@@ -2506,10 +2630,10 @@ with tab_validation:
             )
 
             st.caption(
-                "Mann–Whitney p tests whether the highlighted and comparison "
-                "distributions differ. Rank-biserial effect size shows the "
-                "magnitude and direction of that separation. These statistics "
-                "support group differentiation; they do not establish biological causality."
+                "Mann–Whitney tests whether highlighted and comparison distributions differ; "
+                "rank-biserial effect size describes how strongly they are separated. "
+                "Because these same indicators contribute to the rule that defines the groups, "
+                "this is a descriptive group-separation check, not independent validation."
             )
 
 
@@ -2527,7 +2651,7 @@ with tab_methods:
     st.subheader("Validation framework")
     st.write(
         "Validation has two parts. First, five displayed ground spectra are compared with their corresponding UAV tree spectra using Pearson correlation, spectral angle (SAM) and RMSE. "
-        "Second, internal statistical robustness is checked using P20/P25/P30 threshold sensitivity with Jaccard overlap, and Mann–Whitney U with rank-biserial effect size for highlighted versus comparison trees. "
+        "Second, internal statistical robustness is checked by bootstrap re-estimation of the operational P25 thresholds with Jaccard overlap, together with Mann–Whitney U and rank-biserial effect size as descriptive highlighted-versus-comparison group-separation statistics. "
         "Detailed index checks remain available only on demand."
     )
 
