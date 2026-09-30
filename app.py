@@ -90,6 +90,7 @@ warnings.filterwarnings("ignore")
 APP_TITLE = "🍋 Orchard Intelligence — Water • Biochemistry • Structure"
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
+STATIC_DIR = APP_DIR / "static"
 ZIP_PATH = DATA_DIR / "data.zip"
 
 
@@ -106,7 +107,19 @@ ORCHARD_GLB_CANDIDATES = [
 # GitHub/browser-safe split GLB support.
 # These are consecutive byte chunks of the exact same GLB; no points are lost.
 ORCHARD_GLB_PART_PREFIX = "orchard_pointcloud_WEB_RGB.glb.part"
-ORCHARD_GLB_PART_MANIFEST = DATA_DIR / "orchard_pointcloud_WEB_RGB.parts.json"
+ORCHARD_GLB_PART_MANIFEST = STATIC_DIR / "orchard_pointcloud_WEB_RGB.parts.json"
+
+
+# Coordinate alignment for the web GLB.
+# The web GLB was generated in local metric coordinates by subtracting the
+# minimum XYZ of the cropped EPSG:32643 orchard point cloud.
+ORCHARD_WEB_ORIGIN_X = 286074.739
+ORCHARD_WEB_ORIGIN_Y = 2761286.729
+ORCHARD_WEB_ORIGIN_Z = 230.835
+
+# Crown-selection overlays are drawn just above the highest point in the
+# cropped web cloud so they remain easy to see and hover/click.
+ORCHARD_CROWN_OVERLAY_Z = 8.60
 
 FINAL_DB_CANDIDATES = [
     DATA_DIR / "master_tree_multidomain_FINAL_ALL386.csv",
@@ -588,144 +601,342 @@ def reconstruct_final_database(master: pd.DataFrame, structure: pd.DataFrame) ->
 # =============================================================================
 
 def _find_orchard_glb_parts():
-    """Find ordered split GLB byte chunks inside data/."""
+    """
+    Find the browser-fetchable split GLB files from the repository static/
+    directory. They are intentionally NOT loaded into Python memory.
+    """
     return sorted(
-        p for p in DATA_DIR.glob(f"{ORCHARD_GLB_PART_PREFIX}*")
+        p for p in STATIC_DIR.glob(f"{ORCHARD_GLB_PART_PREFIX}*")
         if p.is_file()
     )
 
 
-@st.cache_resource(show_spinner=False)
-def _load_glb_base64_single(path_str: str) -> str:
-    """Read one complete GLB and cache its base64 representation."""
-    return base64.b64encode(Path(path_str).read_bytes()).decode("ascii")
-
-
-@st.cache_resource(show_spinner=False)
-def _load_glb_base64_parts(part_paths_tuple) -> str:
-    """
-    Reconstruct the exact GLB bytes from small repository parts and
-    cache the base64 representation.
-
-    If the manifest is present, byte count and SHA-256 are verified.
-    """
-    paths = [Path(p) for p in part_paths_tuple]
-
-    if not paths:
-        raise RuntimeError("No orchard GLB parts were supplied.")
-
-    blob = b"".join(p.read_bytes() for p in paths)
-
-    if ORCHARD_GLB_PART_MANIFEST.exists():
-        manifest = json.loads(
-            ORCHARD_GLB_PART_MANIFEST.read_text(encoding="utf-8")
-        )
-
-        expected_parts = [
-            str(item.get("name", "")).strip()
-            for item in manifest.get("parts", [])
-        ]
-        actual_parts = [p.name for p in paths]
-
-        if expected_parts and actual_parts != expected_parts:
-            raise RuntimeError(
-                "3D orchard part list does not match the manifest. "
-                "Make sure every part was uploaded and no old part remains."
-            )
-
-        expected_size = int(manifest.get("source_bytes", -1))
-        if expected_size >= 0 and len(blob) != expected_size:
-            raise RuntimeError(
-                "3D orchard reconstruction failed: byte count differs "
-                "from the original GLB."
-            )
-
-        expected_sha = str(
-            manifest.get("source_sha256", "")
-        ).strip().lower()
-
-        if expected_sha:
-            actual_sha = hashlib.sha256(blob).hexdigest().lower()
-            if actual_sha != expected_sha:
-                raise RuntimeError(
-                    "3D orchard reconstruction failed: SHA-256 does not "
-                    "match the original GLB."
-                )
-
-    return base64.b64encode(blob).decode("ascii")
-
-
 def _resolve_orchard_3d_source():
     """
-    Local development: prefer a complete GLB if present.
-    Streamlit/GitHub deployment: otherwise use split .part files from data/.
+    Return metadata for browser-side loading.
+
+    Important:
+    The GLB parts are served by Streamlit static-file serving and fetched
+    directly by the browser. Python never joins/base64-embeds the ~25 MB GLB.
     """
-    single = first_existing(ORCHARD_GLB_CANDIDATES)
-
-    if single is not None:
-        return {
-            "kind": "single",
-            "path": Path(single),
-            "parts": [],
-        }
-
     parts = _find_orchard_glb_parts()
 
-    if parts:
+    if not parts:
         return {
-            "kind": "parts",
-            "path": None,
-            "parts": parts,
+            "kind": "missing",
+            "parts": [],
+            "total_bytes": 0,
         }
 
+    manifest = {}
+    if ORCHARD_GLB_PART_MANIFEST.exists():
+        try:
+            manifest = json.loads(
+                ORCHARD_GLB_PART_MANIFEST.read_text(encoding="utf-8")
+            )
+        except Exception:
+            manifest = {}
+
+    expected_names = [
+        str(item.get("name", "")).strip()
+        for item in manifest.get("parts", [])
+        if str(item.get("name", "")).strip()
+    ]
+
+    actual_names = [p.name for p in parts]
+
+    if expected_names and actual_names != expected_names:
+        return {
+            "kind": "invalid",
+            "parts": parts,
+            "total_bytes": sum(p.stat().st_size for p in parts),
+            "message": (
+                "The 3D split-file list does not match the manifest. "
+                "Make sure all parts are present in static/ and remove old parts."
+            ),
+        }
+
+    expected_size = manifest.get("source_bytes")
+    actual_size = sum(p.stat().st_size for p in parts)
+
+    if expected_size is not None:
+        try:
+            if int(expected_size) != actual_size:
+                return {
+                    "kind": "invalid",
+                    "parts": parts,
+                    "total_bytes": actual_size,
+                    "message": (
+                        "The combined size of the 3D parts does not match "
+                        "the manifest. One or more parts may be missing."
+                    ),
+                }
+        except Exception:
+            pass
+
     return {
-        "kind": "missing",
-        "path": None,
-        "parts": [],
+        "kind": "static_parts",
+        "parts": parts,
+        "total_bytes": actual_size,
+        "part_count": len(parts),
     }
 
 
-def render_orchard_3d(source, height: int = 650) -> None:
-    """
-    Render the lightweight RGB orchard point cloud inside Streamlit.
+def _json_safe_value(value):
+    """Convert pandas/numpy values into compact JSON-safe display values."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
 
-    Split repository files are joined only in memory when the 3D view is opened.
-    Splitting is byte-preserving and does not alter points or RGB values.
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        if not np.isfinite(float(value)):
+            return ""
+        return float(value)
+    return str(value)
+
+
+def _format_3d_display_value(value):
+    """Match the concise evidence style used in the previous 2D tooltip."""
+    if value is None or value == "":
+        return "NA"
+
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(float(value)):
+            return "NA"
+        return f"{float(value):.3f}"
+
+    return str(value)
+
+
+def _geometry_rings_local(geometry):
+    """
+    Convert Polygon/MultiPolygon crown geometry from EPSG:32643 into
+    local XY coordinates used by the web point cloud.
+    """
+    if geometry is None or geometry.is_empty:
+        return []
+
+    try:
+        geom = geometry.simplify(0.05, preserve_topology=True)
+    except Exception:
+        geom = geometry
+
+    if geom.geom_type == "Polygon":
+        polys = [geom]
+    elif geom.geom_type == "MultiPolygon":
+        polys = list(geom.geoms)
+    else:
+        return []
+
+    rings = []
+
+    for poly in polys:
+        try:
+            coords = list(poly.exterior.coords)
+        except Exception:
+            continue
+
+        if len(coords) < 4:
+            continue
+
+        rings.append([
+            [
+                round(float(x) - ORCHARD_WEB_ORIGIN_X, 3),
+                round(float(y) - ORCHARD_WEB_ORIGIN_Y, 3),
+            ]
+            for x, y in coords
+        ])
+
+    return rings
+
+
+def _to_orchard_utm(source_gdf):
+    """Safely align a GeoDataFrame to EPSG:32643."""
+    if source_gdf is None or source_gdf.empty:
+        return source_gdf.copy() if source_gdf is not None else None
+
+    work = source_gdf.copy()
+
+    if work.crs is None:
+        # Existing production geometry is WGS84; retain this conservative
+        # fallback only to prevent the 3D display layer from crashing the app.
+        work = work.set_crs(epsg=4326, allow_override=True)
+
+    return work.to_crs(epsg=32643)
+
+
+def build_3d_scene_payload(
+    gdf,
+    target_gdf,
+    view,
+    gaps_gdf=None,
+    validation_pair_df=None,
+    show_validation=False,
+):
+    """
+    Build a compact interactive overlay for the 3D orchard.
+
+    Only selected scenario crowns are sent as filled interactive polygons.
+    All-tree crown outlines are intentionally omitted from the browser payload
+    to keep the Streamlit message small and stable.
+    """
+    payload = {
+        "overlay_z": ORCHARD_CROWN_OVERLAY_Z,
+        "targets": [],
+        "validation": [],
+        "gaps": [],
+        "target_color": VIEW_COLORS.get(view, "#E74C3C"),
+        "view": view,
+    }
+
+    # Selected rule-based crowns + the same evidence fields as the former 2D map.
+    if target_gdf is not None and not target_gdf.empty and view != "GAPS":
+        target_utm = _to_orchard_utm(target_gdf)
+
+        spec = [
+            (field, alias)
+            for field, alias in tooltip_spec(view)
+            if field in target_utm.columns
+        ]
+
+        for _, row in target_utm.iterrows():
+            rings = _geometry_rings_local(row.geometry)
+            if not rings:
+                continue
+
+            display_rows = []
+
+            for field, alias in spec:
+                raw = _json_safe_value(row.get(field, ""))
+                display_rows.append({
+                    "label": alias,
+                    "value": _format_3d_display_value(raw),
+                })
+
+            payload["targets"].append({
+                "tree_id": _json_safe_value(row.get("tree_id", "")),
+                "rings": rings,
+                "rows": display_rows,
+            })
+
+    # Optional validation-tree outlines.
+    if (
+        show_validation
+        and validation_pair_df is not None
+        and not validation_pair_df.empty
+        and "TREE_ID" in validation_pair_df.columns
+    ):
+        ids = pd.to_numeric(
+            validation_pair_df["TREE_ID"], errors="coerce"
+        ).dropna().astype(int)
+
+        sample_map = {}
+        for _, r in validation_pair_df.iterrows():
+            tid = pd.to_numeric(
+                pd.Series([r.get("TREE_ID")]), errors="coerce"
+            ).iloc[0]
+            if pd.isna(tid):
+                continue
+            sample_map[int(tid)] = str(
+                r.get("GROUND_SAMPLE", "")
+            ).zfill(4)
+
+        if sample_map:
+            tree_numeric = pd.to_numeric(
+                gdf["tree_id"], errors="coerce"
+            )
+            validation_gdf = gdf[
+                tree_numeric.isin(list(sample_map.keys()))
+            ].copy()
+
+            if not validation_gdf.empty:
+                validation_utm = _to_orchard_utm(validation_gdf)
+
+                for _, row in validation_utm.iterrows():
+                    tid_raw = pd.to_numeric(
+                        pd.Series([row.get("tree_id")]), errors="coerce"
+                    ).iloc[0]
+                    if pd.isna(tid_raw):
+                        continue
+
+                    tid = int(tid_raw)
+                    rings = _geometry_rings_local(row.geometry)
+                    if not rings:
+                        continue
+
+                    payload["validation"].append({
+                        "tree_id": tid,
+                        "ground_sample": sample_map.get(tid, ""),
+                        "rings": rings,
+                    })
+
+    # Planting-gap markers.
+    if view == "GAPS" and gaps_gdf is not None and len(gaps_gdf):
+        gaps_utm = _to_orchard_utm(gaps_gdf)
+
+        for _, row in gaps_utm.iterrows():
+            p = row.geometry
+            if p is None or p.is_empty:
+                continue
+
+            payload["gaps"].append({
+                "x": round(float(p.x) - ORCHARD_WEB_ORIGIN_X, 3),
+                "y": round(float(p.y) - ORCHARD_WEB_ORIGIN_Y, 3),
+                "rows": [
+                    {
+                        "label": "Result",
+                        "value": "Calculated planting gap",
+                    }
+                ],
+            })
+
+    return payload
+
+
+def render_orchard_3d(source, scene_payload, height: int = 690) -> None:
+    """
+    Browser-side 3D viewer.
+
+    Each 4 MiB GLB part is fetched directly from Streamlit's static server.
+    This avoids one huge base64/WebSocket message, which is important on
+    restrictive proxy/firewall networks.
     """
     if not source or source.get("kind") == "missing":
-        st.info(
-            "3D orchard data not found. Upload either the complete GLB or "
-            "all `orchard_pointcloud_WEB_RGB.glb.part###` files into `data/`."
+        st.warning(
+            "3D orchard files were not found in `static/`. "
+            "Upload all `orchard_pointcloud_WEB_RGB.glb.part###` files and "
+            "`orchard_pointcloud_WEB_RGB.parts.json` into the repository "
+            "`static/` folder."
         )
         return
 
-    if source["kind"] == "single":
-        glb_path = Path(source["path"])
-        total_mb = glb_path.stat().st_size / (1024 ** 2)
+    if source.get("kind") == "invalid":
+        st.error(source.get("message", "Invalid 3D split-file set."))
+        return
 
-        with st.spinner(
-            f"Preparing 3D orchard viewer ({total_mb:.1f} MB)…"
-        ):
-            glb_b64 = _load_glb_base64_single(str(glb_path))
+    part_names = [p.name for p in source["parts"]]
+    part_urls = [
+        f"/app/static/{name}"
+        for name in part_names
+    ]
 
-        source_text = f"single GLB · {total_mb:.1f} MiB"
+    scene_json = json.dumps(
+        scene_payload,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    part_urls_json = json.dumps(part_urls, separators=(",", ":"))
 
-    else:
-        parts = [Path(p) for p in source["parts"]]
-        total_mb = sum(p.stat().st_size for p in parts) / (1024 ** 2)
-
-        with st.spinner(
-            f"Joining {len(parts)} 3D files in memory "
-            f"({total_mb:.1f} MB total)…"
-        ):
-            glb_b64 = _load_glb_base64_parts(
-                tuple(str(p) for p in parts)
-            )
-
-        source_text = (
-            f"{len(parts)} split files joined in memory · "
-            f"{total_mb:.1f} MiB total"
-        )
+    total_mb = source.get("total_bytes", 0) / (1024 ** 2)
 
     viewer_html = f"""
 <!doctype html>
@@ -739,14 +950,30 @@ html,body{{
   background:#111;font-family:Arial,Helvetica,sans-serif;
 }}
 #viewer{{position:absolute;inset:0}}
-#box{{
-  position:absolute;top:10px;left:10px;z-index:9;
+#help{{
+  position:absolute;top:10px;left:10px;z-index:10;
   background:rgba(0,0,0,.72);color:#fff;
   padding:9px 11px;border-radius:7px;
-  font-size:13px;line-height:1.35;
+  font-size:13px;line-height:1.4;
+  pointer-events:none;
 }}
 #status{{margin-top:4px;color:#ddd}}
 #error{{margin-top:4px;color:#ffaaaa;white-space:pre-wrap}}
+#hoverCard{{
+  display:none;position:absolute;right:12px;top:12px;z-index:12;
+  min-width:270px;max-width:390px;background:rgba(15,15,15,.95);
+  color:white;border:1px solid rgba(255,255,255,.28);
+  border-radius:9px;padding:10px 12px;
+  box-shadow:0 8px 30px rgba(0,0,0,.35);font-size:13px;
+}}
+#hoverCard .title{{font-weight:800;font-size:15px;margin-bottom:7px}}
+#hoverCard table{{width:100%;border-collapse:collapse}}
+#hoverCard td{{
+  padding:4px 5px;border-bottom:1px solid rgba(255,255,255,.10);
+  vertical-align:top;
+}}
+#hoverCard td:first-child{{font-weight:700;white-space:nowrap;padding-right:14px}}
+#hoverCard .pin{{margin-top:7px;opacity:.72;font-size:11px}}
 </style>
 
 <script type="importmap">
@@ -761,11 +988,19 @@ html,body{{
 
 <body>
 <div id="viewer"></div>
-<div id="box">
-  <b>RGB orchard — 3D view</b><br>
-  Drag = rotate · Wheel = zoom · Right drag = pan
-  <div id="status">Preparing 3D point cloud…</div>
+
+<div id="help">
+  <b>RGB orchard — interactive 3D scenario map</b><br>
+  Drag = rotate · Wheel = zoom · Right drag = pan<br>
+  Hover highlighted crown = evidence · Click = pin popup
+  <div id="status">Starting viewer…</div>
   <div id="error"></div>
+</div>
+
+<div id="hoverCard">
+  <div class="title" id="cardTitle"></div>
+  <div id="cardBody"></div>
+  <div class="pin" id="cardPin"></div>
 </div>
 
 <script type="module">
@@ -773,12 +1008,22 @@ import * as THREE from 'three';
 import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
 import {{ GLTFLoader }} from 'three/addons/loaders/GLTFLoader.js';
 
+const PART_URLS = {part_urls_json};
+const PAYLOAD = {scene_json};
+
 const viewer = document.getElementById('viewer');
 const statusEl = document.getElementById('status');
 const errorEl = document.getElementById('error');
+const hoverCard = document.getElementById('hoverCard');
+const cardTitle = document.getElementById('cardTitle');
+const cardBody = document.getElementById('cardBody');
+const cardPin = document.getElementById('cardPin');
 
 function setStatus(s){{ statusEl.textContent = s; }}
-function fail(s){{ errorEl.textContent = s; console.error(s); }}
+function fail(s){{
+  errorEl.textContent = s;
+  console.error(s);
+}}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x111111);
@@ -810,37 +1055,172 @@ function makeCircleTexture(){{
   ctx.arc(16,16,14,0,Math.PI*2);
   ctx.fillStyle = 'white';
   ctx.fill();
-
   const tex = new THREE.CanvasTexture(c);
   tex.needsUpdate = true;
   return tex;
 }}
 const circleTexture = makeCircleTexture();
 
-const GLB_BASE64 = "{glb_b64}";
-
-function decodeBase64(base64){{
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for(let i=0; i<binary.length; i++) {{
-    bytes[i] = binary.charCodeAt(i);
+function ringToShape(ring){{
+  if(!ring || ring.length < 3) return null;
+  const shape = new THREE.Shape();
+  shape.moveTo(ring[0][0], ring[0][1]);
+  for(let i=1;i<ring.length;i++){{
+    shape.lineTo(ring[i][0], ring[i][1]);
   }}
-  return bytes.buffer;
+  shape.closePath();
+  return shape;
 }}
 
+function addOutline(ring, color, z, opacity=1.0){{
+  if(!ring || ring.length < 2) return;
+  const pts = ring.map(p => new THREE.Vector3(p[0],p[1],z));
+  const geometry = new THREE.BufferGeometry().setFromPoints(pts);
+  const material = new THREE.LineBasicMaterial({{
+    color:new THREE.Color(color),
+    transparent:opacity < 1,
+    opacity:opacity,
+    depthTest:false,
+    depthWrite:false
+  }});
+  const line = new THREE.Line(geometry, material);
+  line.renderOrder = 20;
+  scene.add(line);
+}}
+
+const interactiveObjects = [];
+const zOverlay = Number(PAYLOAD.overlay_z || 8.6);
+const targetColor = PAYLOAD.target_color || '#E74C3C';
+
+for(const item of (PAYLOAD.validation || [])){{
+  for(const ring of (item.rings || [])){{
+    addOutline(ring, '#00A6D6', zOverlay + 0.045, 0.95);
+  }}
+}}
+
+for(const item of (PAYLOAD.targets || [])){{
+  for(const ring of (item.rings || [])){{
+    const shape = ringToShape(ring);
+    if(!shape) continue;
+
+    const geometry = new THREE.ShapeGeometry(shape);
+    const material = new THREE.MeshBasicMaterial({{
+      color:new THREE.Color(targetColor),
+      transparent:true,
+      opacity:0.34,
+      side:THREE.DoubleSide,
+      depthTest:false,
+      depthWrite:false
+    }});
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.z = zOverlay + 0.02;
+    mesh.renderOrder = 30;
+    mesh.userData.kind = 'tree';
+    mesh.userData.tree_id = item.tree_id;
+    mesh.userData.rows = item.rows || [];
+    interactiveObjects.push(mesh);
+    scene.add(mesh);
+
+    addOutline(ring, targetColor, zOverlay + 0.055, 1.0);
+  }}
+}}
+
+for(const item of (PAYLOAD.gaps || [])){{
+  const geometry = new THREE.SphereGeometry(0.55, 18, 12);
+  const material = new THREE.MeshBasicMaterial({{
+    color:new THREE.Color('#C0392B'),
+    depthTest:false,
+    depthWrite:false
+  }});
+
+  const marker = new THREE.Mesh(geometry, material);
+  marker.position.set(item.x,item.y,zOverlay+0.55);
+  marker.renderOrder = 35;
+  marker.userData.kind = 'gap';
+  marker.userData.rows = item.rows || [];
+  interactiveObjects.push(marker);
+  scene.add(marker);
+}}
+
+function showCard(obj,pinned){{
+  if(!obj){{
+    hoverCard.style.display='none';
+    return;
+  }}
+
+  const isTree = obj.userData.kind === 'tree';
+  cardTitle.textContent = isTree
+    ? 'Tree ID: ' + String(obj.userData.tree_id)
+    : 'Planting gap';
+
+  cardBody.innerHTML='';
+
+  const table=document.createElement('table');
+
+  for(const row of (obj.userData.rows || [])){{
+    const tr=document.createElement('tr');
+    const td1=document.createElement('td');
+    const td2=document.createElement('td');
+    td1.textContent=String(row.label || '');
+    td2.textContent=String(row.value || 'NA');
+    tr.appendChild(td1);
+    tr.appendChild(td2);
+    table.appendChild(tr);
+  }}
+
+  cardBody.appendChild(table);
+  cardPin.textContent = pinned
+    ? 'Pinned — click empty space to close'
+    : 'Click crown to pin';
+  hoverCard.style.display='block';
+}}
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let pinnedObject = null;
+let hoverObject = null;
+
+function pick(event){{
+  if(!interactiveObjects.length) return null;
+  const rect=renderer.domElement.getBoundingClientRect();
+  pointer.x=((event.clientX-rect.left)/rect.width)*2-1;
+  pointer.y=-((event.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(pointer,camera);
+  const hits=raycaster.intersectObjects(interactiveObjects,false);
+  return hits.length ? hits[0].object : null;
+}}
+
+renderer.domElement.addEventListener('pointermove',(event)=>{{
+  const obj=pick(event);
+  hoverObject=obj;
+  renderer.domElement.style.cursor=obj?'pointer':'grab';
+  if(!pinnedObject) showCard(obj,false);
+}});
+
+renderer.domElement.addEventListener('click',(event)=>{{
+  const obj=pick(event);
+  if(obj){{
+    pinnedObject=obj;
+    showCard(obj,true);
+  }} else {{
+    pinnedObject=null;
+    showCard(hoverObject,false);
+  }}
+}});
+
 function showCloud(gltf){{
-  const root = gltf.scene;
-  let totalPoints = 0;
-  let pointObjects = 0;
+  const root=gltf.scene;
+  let totalPoints=0;
+  let pointObjects=0;
 
-  root.traverse((obj) => {{
+  root.traverse((obj)=>{{
     if(!obj.isPoints) return;
-
     pointObjects += 1;
-    const pos = obj.geometry?.attributes?.position;
+    const pos=obj.geometry?.attributes?.position;
     if(pos) totalPoints += pos.count;
 
-    obj.material = new THREE.PointsMaterial({{
+    obj.material=new THREE.PointsMaterial({{
       size:1.6,
       sizeAttenuation:false,
       vertexColors:true,
@@ -851,79 +1231,111 @@ function showCloud(gltf){{
     }});
   }});
 
-  if(pointObjects === 0){{
-    setStatus('GLB loaded but no point-cloud object was found.');
-    fail('No THREE.Points primitive was detected.');
+  if(pointObjects===0){{
+    setStatus('GLB loaded but no point cloud was found.');
     return;
   }}
 
   scene.add(root);
 
-  const box = new THREE.Box3().setFromObject(root);
-  if(box.isEmpty()){{
-    setStatus('3D cloud has empty bounds.');
-    return;
-  }}
-
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const d = Math.max(size.x, size.y, size.z);
+  const box=new THREE.Box3().setFromObject(root);
+  const center=box.getCenter(new THREE.Vector3());
+  const size=box.getSize(new THREE.Vector3());
+  const d=Math.max(size.x,size.y,size.z);
 
   controls.target.copy(center);
-
   camera.position.set(
-    center.x + d * 0.80,
-    center.y - d * 1.00,
-    center.z + d * 0.55
+    center.x+d*0.80,
+    center.y-d*1.00,
+    center.z+d*0.55
   );
-
-  camera.near = Math.max(0.01, d / 10000);
-  camera.far = Math.max(1000, d * 30);
+  camera.near=Math.max(0.01,d/10000);
+  camera.far=Math.max(1000,d*30);
   camera.updateProjectionMatrix();
-
-  controls.minDistance = Math.max(0.2, d * 0.002);
-  controls.maxDistance = d * 8;
+  controls.minDistance=Math.max(0.2,d*0.002);
+  controls.maxDistance=d*8;
   controls.update();
 
   setStatus(
-    'Loaded: ' + totalPoints.toLocaleString() +
-    ' RGB points · circular points · 1.6 px'
+    'Loaded: '+totalPoints.toLocaleString()+
+    ' RGB points · '+(PAYLOAD.targets || []).length+
+    ' highlighted crowns'
   );
 }}
 
-const loader = new GLTFLoader();
-
-setTimeout(() => {{
+async function loadSplitGLB(){{
   try {{
-    setStatus('Decoding 3D orchard…');
-    const arrayBuffer = decodeBase64(GLB_BASE64);
+    if(!PART_URLS.length){{
+      throw new Error('No 3D part URLs were supplied.');
+    }}
 
-    setStatus('Building 3D scene…');
+    const chunks=[];
+    let totalBytes=0;
+
+    for(let i=0;i<PART_URLS.length;i++){{
+      setStatus(
+        'Loading 3D file '+(i+1)+' of '+PART_URLS.length+'…'
+      );
+
+      const response=await fetch(PART_URLS[i], {{
+        cache:'force-cache',
+        credentials:'same-origin'
+      }});
+
+      if(!response.ok){{
+        throw new Error(
+          'Could not load '+PART_URLS[i]+
+          ' (HTTP '+response.status+')'
+        );
+      }}
+
+      const buf=await response.arrayBuffer();
+      const bytes=new Uint8Array(buf);
+      chunks.push(bytes);
+      totalBytes += bytes.byteLength;
+    }}
+
+    setStatus('Joining 3D files in browser…');
+
+    const merged=new Uint8Array(totalBytes);
+    let offset=0;
+
+    for(const chunk of chunks){{
+      merged.set(chunk,offset);
+      offset += chunk.byteLength;
+    }}
+
+    setStatus('Building 3D orchard…');
+
+    const loader=new GLTFLoader();
     loader.parse(
-      arrayBuffer,
+      merged.buffer,
       '',
       showCloud,
-      (err) => {{
+      (err)=>{{
         setStatus('Failed to parse 3D orchard.');
         fail(err?.message || String(err));
       }}
     );
+
   }} catch(err) {{
-    setStatus('Failed to prepare 3D orchard.');
+    setStatus('3D orchard could not load.');
     fail(err?.message || String(err));
   }}
-}}, 60);
+}}
 
-addEventListener('resize', () => {{
-  camera.aspect = innerWidth / innerHeight;
+loadSplitGLB();
+
+addEventListener('resize',()=>{{
+  camera.aspect=innerWidth/innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
+  renderer.setSize(innerWidth,innerHeight);
 }});
 
 function animate(){{
   requestAnimationFrame(animate);
   controls.update();
-  renderer.render(scene, camera);
+  renderer.render(scene,camera);
 }}
 animate();
 </script>
@@ -937,7 +1349,11 @@ animate();
         scrolling=False,
     )
 
-    st.caption(f"3D source: {source_text}")
+    st.caption(
+        f"3D data: {len(source['parts'])} browser-fetched files, "
+        f"{total_mb:.1f} MiB total. The large point cloud is not sent "
+        "through the Streamlit WebSocket."
+    )
 
 
 # =============================================================================
@@ -2330,7 +2746,7 @@ view = st.sidebar.radio(
     format_func=lambda k: VIEW_OPTIONS[k],
     label_visibility="collapsed",
 )
-st.sidebar.caption("The map highlights only trees that meet the selected supported rule.")
+st.sidebar.caption("The 3D orchard highlights only trees that meet the selected supported rule.")
 show_field_validation_trees = False
 if not validation_pair_df.empty:
     show_field_validation_trees = st.sidebar.checkbox(
@@ -2405,58 +2821,55 @@ with tab_map:
         c2.metric("Share of orchard", f"{100 * len(target_gdf) / len(gdf):.1f}%")
         c3.metric("Total mapped trees", len(gdf))
 
-    map_view_mode = st.radio(
-        "Map view",
-        ["2D scenario map", "3D RGB orchard"],
-        horizontal=True,
-        key="map_view_mode",
-        help=(
-            "2D shows the rule-based highlighted crowns and popups. "
-            "3D is a visualization-only RGB point-cloud view of the orchard."
-        ),
-    )
-
-    if map_view_mode == "3D RGB orchard":
+    # The orchard map is fully 3D.
+    # Large point-cloud bytes are fetched by the browser from static/.
+    try:
         orchard_3d_source = _resolve_orchard_3d_source()
 
         if orchard_3d_source["kind"] == "missing":
             st.warning(
-                "3D orchard data is missing. Upload all "
+                "3D orchard files are missing from `static/`. Upload all "
                 "`orchard_pointcloud_WEB_RGB.glb.part###` files plus "
-                "`orchard_pointcloud_WEB_RGB.parts.json` into `data/`."
+                "`orchard_pointcloud_WEB_RGB.parts.json` into `static/`."
             )
+        elif orchard_3d_source["kind"] == "invalid":
+            st.error(orchard_3d_source.get(
+                "message",
+                "The 3D split-file set is incomplete."
+            ))
         else:
-            render_orchard_3d(orchard_3d_source, height=650)
-            st.caption(
-                "Visualization only: RGB-coloured UAV point cloud. "
-                "Split deployment files reconstruct the exact GLB in memory, "
-                "with no point or RGB loss. This view does not alter Water, "
-                "Biochemical, Structure, or validation results."
+            scene_payload = build_3d_scene_payload(
+                gdf=gdf,
+                target_gdf=target_gdf,
+                view=view,
+                gaps_gdf=gaps_gdf if view == "GAPS" else None,
+                validation_pair_df=validation_pair_df,
+                show_validation=show_field_validation_trees,
             )
-    else:
-        center = [gdf.geometry.centroid.y.mean(), gdf.geometry.centroid.x.mean()]
-        m = folium.Map(location=center, zoom_start=18, max_zoom=22, tiles="CartoDB positron")
-        folium.GeoJson(
-            gdf,
-            style_function=lambda _: {"fillColor": "#D0D0D0", "color": "#777777", "weight": 0.7, "fillOpacity": 0.05},
-            name="All tree crowns",
-        ).add_to(m)
 
-        if view == "GAPS":
-            for _, row in gaps_gdf.iterrows():
-                folium.CircleMarker(
-                    [row.geometry.y, row.geometry.x], radius=5, color="#C0392B", fill=True, fill_opacity=.9,
-                    tooltip="Calculated planting gap"
-                ).add_to(m)
-        else:
-            add_target_layer(m, target_gdf, view)
+            render_orchard_3d(
+                orchard_3d_source,
+                scene_payload,
+                height=690,
+            )
 
-        if show_field_validation_trees and not validation_pair_df.empty:
-            add_field_validation_layer(m, gdf, validation_pair_df)
+            if view == "GAPS":
+                st.caption(
+                    "Red 3D markers are calculated planting-gap locations. "
+                    "Hover or click a marker for its popup."
+                )
+            else:
+                st.caption(
+                    "Rule-based trees are highlighted directly over their "
+                    "crown footprints. Hover for evidence values; click to "
+                    "keep the popup open."
+                )
 
-        folium.LayerControl(collapsed=True).add_to(m)
-        st_folium(m, height=650, use_container_width=True)
-        st.caption("Hover = quick evidence. Click = persistent popup. No Tree-ID selection is required.")
+    except Exception as exc:
+        st.error(
+            "The 3D display layer could not initialize, but the rest of the "
+            f"app is still available. Details: {type(exc).__name__}: {exc}"
+        )
 
     if view != "GAPS" and not target_gdf.empty:
         col1, col2 = st.columns(2)
