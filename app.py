@@ -985,8 +985,11 @@ def render_orchard_3d(source, scene_payload, height: int = 690) -> None:
         return
 
     part_names = [p.name for p in source["parts"]]
+    # Use Streamlit's documented relative static-file URL form.
+    # This is safer on Streamlit Community Cloud / reverse proxies than
+    # a root-absolute "/app/static/..." path.
     part_urls = [
-        f"/app/static/{name}"
+        f"app/static/{name}"
         for name in part_names
     ]
 
@@ -1338,20 +1341,43 @@ async function loadSplitGLB(){{
         'Loading 3D file '+(i+1)+' of '+PART_URLS.length+'…'
       );
 
-      const response=await fetch(PART_URLS[i], {{
-        cache:'force-cache',
+      // Resolve relative to the real parent Streamlit page, not the srcdoc iframe.
+      const resolvedUrl = new URL(
+        PART_URLS[i],
+        window.parent.location.href
+      ).href;
+
+      const response=await fetch(resolvedUrl, {{
+        cache:'no-cache',
         credentials:'same-origin'
       }});
 
       if(!response.ok){{
         throw new Error(
-          'Could not load '+PART_URLS[i]+
-          ' (HTTP '+response.status+')'
+          'Could not load 3D part '+(i+1)+
+          ' (HTTP '+response.status+').'
         );
       }}
 
       const buf=await response.arrayBuffer();
       const bytes=new Uint8Array(buf);
+
+      // Catch the exact failure seen on Streamlit Cloud:
+      // an HTML app page/404 being returned instead of a binary GLB chunk.
+      if(bytes.length >= 9){{
+        const prefix = new TextDecoder()
+          .decode(bytes.slice(0, Math.min(100, bytes.length)))
+          .trimStart()
+          .toLowerCase();
+
+        if(prefix.startsWith('<!doctype') || prefix.startsWith('<html')){{
+          throw new Error(
+            'Streamlit returned HTML instead of 3D part '+(i+1)+
+            '. The static-file route is not resolving correctly.'
+          );
+        }}
+      }}
+
       chunks.push(bytes);
       totalBytes += bytes.byteLength;
     }}
@@ -1364,6 +1390,20 @@ async function loadSplitGLB(){{
     for(const chunk of chunks){{
       merged.set(chunk,offset);
       offset += chunk.byteLength;
+    }}
+
+    // Binary GLB must begin with ASCII "glTF".
+    if(
+      merged.length < 4 ||
+      merged[0] !== 0x67 ||
+      merged[1] !== 0x6c ||
+      merged[2] !== 0x54 ||
+      merged[3] !== 0x46
+    ){{
+      throw new Error(
+        'The joined files are not a valid GLB. '+
+        'Check that every part belongs to the same split set.'
+      );
     }}
 
     setStatus('Building 3D orchard…');
