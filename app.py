@@ -2582,6 +2582,14 @@ with tab_validation:
         )
 
         metrics = [m for m in scenario_metrics(view) if m in gdf.columns]
+
+        # PRI is supplementary support for the Water domain and is not part of
+        # the core Water decision rule. Exclude it from the Mann–Whitney
+        # group-separation test so the statistical summary reflects only the
+        # rule-defining Water indicators.
+        if view in {"WATER", "WB", "WBS"}:
+            metrics = [m for m in metrics if m != "PRI_VALUE"]
+
         stats_df = comparison_statistics(
             gdf,
             current_mask,
