@@ -46,6 +46,7 @@ import json
 import math
 import os
 import re
+import struct
 import tempfile
 import warnings
 import zipfile
@@ -610,7 +611,7 @@ def _find_orchard_glb_parts():
 @st.cache_resource(show_spinner=False)
 def _load_glb_base64_single(path_str: str) -> str:
     """Read one complete GLB and cache its base64 representation."""
-    return base64.b64encode(Path(path_str).read_bytes()).decode("ascii")
+    return base64.b64encode(_glb_blob_single(path_str)).decode("ascii")
 
 
 @st.cache_resource(show_spinner=False)
@@ -776,6 +777,217 @@ def _geometry_rings_local(geometry):
     return rings
 
 
+
+@st.cache_resource(show_spinner=False)
+def _glb_blob_single(path_str: str) -> bytes:
+    return Path(path_str).read_bytes()
+
+
+@st.cache_resource(show_spinner=False)
+def _glb_blob_parts(part_paths_tuple) -> bytes:
+    paths = [Path(p) for p in part_paths_tuple]
+    blob = b"".join(p.read_bytes() for p in paths)
+
+    if len(blob) < 12 or blob[:4] != b"glTF":
+        raise RuntimeError(
+            "Joined 3D parts are not a valid GLB. "
+            "Please use one complete split set."
+        )
+
+    if ORCHARD_GLB_PART_MANIFEST.exists():
+        manifest = json.loads(
+            ORCHARD_GLB_PART_MANIFEST.read_text(encoding="utf-8")
+        )
+
+        expected_size = manifest.get("source_bytes")
+        if expected_size is not None and int(expected_size) != len(blob):
+            raise RuntimeError(
+                "Joined 3D byte count does not match the manifest."
+            )
+
+        expected_sha = str(
+            manifest.get("source_sha256", "")
+        ).strip().lower()
+
+        if expected_sha:
+            actual_sha = hashlib.sha256(blob).hexdigest().lower()
+            if actual_sha != expected_sha:
+                raise RuntimeError(
+                    "Joined 3D SHA-256 does not match the manifest."
+                )
+
+    return blob
+
+
+def _parse_glb_xyz_sorted(blob: bytes):
+    """
+    Read POSITION float32 VEC3 from the orchard GLB and return XYZ sorted by X.
+
+    Sorting once makes per-crown canopy-height lookup fast without scanning
+    all ~1.79 million points for every tree.
+    """
+    if len(blob) < 20 or blob[:4] != b"glTF":
+        raise RuntimeError("Invalid GLB header.")
+
+    _magic, version, declared_len = struct.unpack_from("<III", blob, 0)
+    if version != 2:
+        raise RuntimeError(f"Unsupported GLB version: {version}")
+    if declared_len > len(blob):
+        raise RuntimeError("Incomplete GLB bytes.")
+
+    offset = 12
+    json_chunk = None
+    bin_chunk = None
+
+    while offset + 8 <= len(blob):
+        chunk_len, chunk_type = struct.unpack_from("<II", blob, offset)
+        offset += 8
+        chunk = blob[offset:offset + chunk_len]
+        offset += chunk_len
+
+        if chunk_type == 0x4E4F534A:      # JSON
+            json_chunk = chunk
+        elif chunk_type == 0x004E4942:    # BIN
+            bin_chunk = chunk
+
+    if json_chunk is None or bin_chunk is None:
+        raise RuntimeError("GLB JSON/BIN chunk missing.")
+
+    doc = json.loads(
+        json_chunk.decode("utf-8").rstrip(" \x00")
+    )
+
+    primitive = doc["meshes"][0]["primitives"][0]
+    pos_accessor = doc["accessors"][
+        primitive["attributes"]["POSITION"]
+    ]
+
+    if (
+        int(pos_accessor.get("componentType", -1)) != 5126
+        or pos_accessor.get("type") != "VEC3"
+    ):
+        raise RuntimeError("Unexpected GLB POSITION format.")
+
+    view = doc["bufferViews"][pos_accessor["bufferView"]]
+    byte_offset = (
+        int(view.get("byteOffset", 0))
+        + int(pos_accessor.get("byteOffset", 0))
+    )
+    count = int(pos_accessor["count"])
+
+    xyz = np.frombuffer(
+        bin_chunk,
+        dtype="<f4",
+        count=count * 3,
+        offset=byte_offset,
+    ).reshape(count, 3)
+
+    order = np.argsort(xyz[:, 0], kind="mergesort")
+
+    return (
+        np.asarray(xyz[order, 0], dtype=np.float32),
+        np.asarray(xyz[order, 1], dtype=np.float32),
+        np.asarray(xyz[order, 2], dtype=np.float32),
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def _glb_xyz_sorted_single(path_str: str):
+    return _parse_glb_xyz_sorted(_glb_blob_single(path_str))
+
+
+@st.cache_resource(show_spinner=False)
+def _glb_xyz_sorted_parts(part_paths_tuple):
+    return _parse_glb_xyz_sorted(
+        _glb_blob_parts(part_paths_tuple)
+    )
+
+
+def _get_glb_xyz_sorted(source):
+    if source["kind"] == "single":
+        return _glb_xyz_sorted_single(str(source["path"]))
+
+    return _glb_xyz_sorted_parts(
+        tuple(str(p) for p in source["parts"])
+    )
+
+
+def _points_inside_ring_np(x, y, ring):
+    """
+    Vectorized ray-crossing point-in-polygon test.
+    """
+    ring_arr = np.asarray(ring, dtype=float)
+    if len(ring_arr) < 3:
+        return np.zeros(len(x), dtype=bool)
+
+    inside = np.zeros(len(x), dtype=bool)
+
+    xj, yj = ring_arr[-1]
+    for xi, yi in ring_arr:
+        crossing = ((yi > y) != (yj > y))
+        denom = (yj - yi)
+        if abs(float(denom)) < 1e-12:
+            denom = 1e-12
+
+        x_intersect = (xj - xi) * (y - yi) / denom + xi
+        inside ^= crossing & (x < x_intersect)
+        xj, yj = xi, yi
+
+    return inside
+
+
+def _crown_anchor_z(x_sorted, y_sorted, z_sorted, rings, fallback_z):
+    """
+    Find canopy P95 from actual GLB points inside a crown polygon.
+
+    P95 is used instead of maximum Z to avoid a single high outlier.
+    """
+    if not rings:
+        return float(fallback_z)
+
+    xs = [p[0] for ring in rings for p in ring]
+    ys = [p[1] for ring in rings for p in ring]
+
+    if not xs or not ys:
+        return float(fallback_z)
+
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    lo = int(np.searchsorted(x_sorted, min_x, side="left"))
+    hi = int(np.searchsorted(x_sorted, max_x, side="right"))
+
+    if hi <= lo:
+        return float(fallback_z)
+
+    cx = x_sorted[lo:hi]
+    cy = y_sorted[lo:hi]
+    cz = z_sorted[lo:hi]
+
+    bbox_mask = (cy >= min_y) & (cy <= max_y)
+    if not np.any(bbox_mask):
+        return float(fallback_z)
+
+    cx = cx[bbox_mask]
+    cy = cy[bbox_mask]
+    cz = cz[bbox_mask]
+
+    inside = np.zeros(len(cx), dtype=bool)
+    for ring in rings:
+        inside |= _points_inside_ring_np(cx, cy, ring)
+
+    if not np.any(inside):
+        return float(fallback_z)
+
+    z_inside = cz[inside]
+    z_inside = z_inside[np.isfinite(z_inside)]
+
+    if len(z_inside) == 0:
+        return float(fallback_z)
+
+    return float(np.nanpercentile(z_inside, 95))
+
+
 def build_3d_scene_payload(
     gdf,
     target_gdf,
@@ -783,6 +995,7 @@ def build_3d_scene_payload(
     gaps_gdf=None,
     validation_pair_df=None,
     show_validation=False,
+    glb_xyz_sorted=None,
 ):
     """
     Build lightweight JSON overlays for the 3D orchard:
@@ -816,6 +1029,17 @@ def build_3d_scene_payload(
             if not rings:
                 continue
 
+            if glb_xyz_sorted is not None:
+                crown_z = _crown_anchor_z(
+                    glb_xyz_sorted[0],
+                    glb_xyz_sorted[1],
+                    glb_xyz_sorted[2],
+                    rings,
+                    ORCHARD_CROWN_OVERLAY_Z,
+                )
+            else:
+                crown_z = float(ORCHARD_CROWN_OVERLAY_Z)
+
             display_rows = []
             for field, alias in spec:
                 raw = _json_safe_value(row.get(field, ""))
@@ -827,6 +1051,7 @@ def build_3d_scene_payload(
             payload["targets"].append({
                 "tree_id": _json_safe_value(row.get("tree_id", "")),
                 "rings": rings,
+                "z": round(float(crown_z) + 0.05, 3),
                 "rows": display_rows,
             })
 
@@ -865,10 +1090,22 @@ def build_3d_scene_payload(
                     if not rings:
                         continue
 
+                    if glb_xyz_sorted is not None:
+                        crown_z = _crown_anchor_z(
+                            glb_xyz_sorted[0],
+                            glb_xyz_sorted[1],
+                            glb_xyz_sorted[2],
+                            rings,
+                            ORCHARD_CROWN_OVERLAY_Z,
+                        )
+                    else:
+                        crown_z = float(ORCHARD_CROWN_OVERLAY_Z)
+
                     payload["validation"].append({
                         "tree_id": _json_safe_value(tree_id),
                         "ground_sample": sample_map.get(int(tree_id), ""),
                         "rings": rings,
+                        "z": round(float(crown_z) + 0.05, 3),
                     })
 
     # Planting-gap markers.
@@ -1035,6 +1272,12 @@ const GLB_BASE64 = "{glb_b64}";
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x111111);
 
+// Point cloud and rule overlays share ONE parent transform.
+// This guarantees that every highlighted crown rotates/pans/orients
+// together with the orchard.
+const orchardGroup = new THREE.Group();
+scene.add(orchardGroup);
+
 const camera = new THREE.PerspectiveCamera(
   48, innerWidth / innerHeight, 0.01, 5000
 );
@@ -1104,13 +1347,13 @@ function addOutline(ring, color, z, opacity=1.0, width=1){{
     color:new THREE.Color(color),
     transparent:opacity < 1,
     opacity:opacity,
-    depthTest:false,
+    depthTest:true,
     depthWrite:false
   }});
 
   const line = new THREE.Line(geometry, material);
   line.renderOrder = 20;
-  scene.add(line);
+  orchardGroup.add(line);
 }}
 
 const interactiveObjects = [];
@@ -1118,8 +1361,9 @@ const zOverlay = Number(PAYLOAD.overlay_z || 8.6);
 
 // Optional field-reference validation outlines.
 for(const item of (PAYLOAD.validation || [])){{
+  const itemZ = Number(item.z ?? zOverlay);
   for(const ring of (item.rings || [])){{
-    addOutline(ring, '#00A6D6', zOverlay + 0.045, 0.95);
+    addOutline(ring, '#00A6D6', itemZ + 0.015, 0.95);
   }}
 }}
 
@@ -1137,20 +1381,20 @@ for(const item of (PAYLOAD.targets || [])){{
       transparent:true,
       opacity:0.30,
       side:THREE.DoubleSide,
-      depthTest:false,
+      depthTest:true,
       depthWrite:false
     }});
 
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.z = zOverlay + 0.02;
+    mesh.position.z = Number(item.z ?? zOverlay);
     mesh.renderOrder = 30;
     mesh.userData.kind = 'tree';
     mesh.userData.tree_id = item.tree_id;
     mesh.userData.rows = item.rows || [];
     interactiveObjects.push(mesh);
-    scene.add(mesh);
+    orchardGroup.add(mesh);
 
-    addOutline(ring, targetColor, zOverlay + 0.055, 1.0);
+    addOutline(ring, targetColor, Number(item.z ?? zOverlay) + 0.015, 1.0);
   }}
 }}
 
@@ -1169,7 +1413,7 @@ for(const item of (PAYLOAD.gaps || [])){{
   marker.userData.kind = 'gap';
   marker.userData.rows = item.rows || [];
   interactiveObjects.push(marker);
-  scene.add(marker);
+  orchardGroup.add(marker);
 }}
 
 function showCard(obj, pinned){{
@@ -1279,7 +1523,7 @@ function showCloud(gltf){{
     return;
   }}
 
-  scene.add(root);
+  orchardGroup.add(root);
 
   const box = new THREE.Box3().setFromObject(root);
   if(box.isEmpty()){{
@@ -2851,6 +3095,9 @@ with tab_map:
             "`orchard_pointcloud_WEB_RGB.parts.json` into `data/`."
         )
     else:
+        with st.spinner("Aligning highlighted crowns to 3D tree canopies…"):
+            glb_xyz_sorted = _get_glb_xyz_sorted(orchard_3d_source)
+
         scene_payload = build_3d_scene_payload(
             gdf=gdf,
             target_gdf=target_gdf,
@@ -2858,6 +3105,7 @@ with tab_map:
             gaps_gdf=gaps_gdf if view == "GAPS" else None,
             validation_pair_df=validation_pair_df,
             show_validation=show_field_validation_trees,
+            glb_xyz_sorted=glb_xyz_sorted,
         )
 
         try:
