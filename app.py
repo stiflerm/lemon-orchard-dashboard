@@ -39,6 +39,8 @@ only supported findings; upstream QC continues to control which measurements are
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import json
 import math
@@ -57,6 +59,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from shapely.geometry import Point
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.decomposition import PCA
@@ -89,200 +92,21 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 ZIP_PATH = DATA_DIR / "data.zip"
 
-FINAL_DB_CANDIDATES = [
-    DATA_DIR / "master_tree_multidomain_FINAL_ALL386.csv",
-    APP_DIR / "master_tree_multidomain_FINAL_ALL386.csv",
-    Path(r"D:\hx_UAV_data_processing\final_rule_database_ALL_386\master_tree_multidomain_FINAL_ALL386.csv"),
+
+# Optional lightweight RGB-coloured 3D orchard point cloud.
+# Visualization only: this does not alter any scientific classification.
+#
+# The app supports either:
+# 1) one complete GLB; or
+# 2) small .part### files placed in data/ for browser/proxy-safe upload.
+ORCHARD_GLB_CANDIDATES = [
+    DATA_DIR / "orchard_pointcloud_WEB_RGB.glb",
+    APP_DIR / "orchard_pointcloud_WEB_RGB.glb",
+    Path(r"D:\hx_UAV_data_processing\3D_ORCHARD_VIEW\orchard_pointcloud_WEB_RGB.glb"),
 ]
 
-THRESHOLD_JSON_CANDIDATES = [
-    DATA_DIR / "thresholds_FINAL_ALL386.json",
-    APP_DIR / "thresholds_FINAL_ALL386.json",
-    Path(r"D:\hx_UAV_data_processing\final_rule_database_ALL_386\thresholds_FINAL_ALL386.json"),
-]
-
-VNIR_SWIR_CANDIDATES = [
-    DATA_DIR / "master_tree_rule_database_VNIR_SWIR.csv",
-    APP_DIR / "master_tree_rule_database_VNIR_SWIR.csv",
-]
-
-STRUCTURE_CANDIDATES = [
-    DATA_DIR / "structural_domain_FINAL_compact.csv",
-    APP_DIR / "structural_domain_FINAL_compact.csv",
-]
-
-# Optional full-spectrum product used ONLY for per-tree spectral visualization.
-# It is NOT used to calculate Water, Biochemical, Structure, or the final priority.
-# Prefer ONLY the post-QC consensus spectrum. The pre-QC master_tree_spectra.csv
-# is deliberately not used in the final app, even for display.
-SPECTRAL_CSV_CANDIDATES = [
-    # Complete 386-tree representative VNIR spectra. VISUALIZATION ONLY.
-    DATA_DIR / "VNIR_spectra_indices_ALL_386.csv",
-    APP_DIR / "VNIR_spectra_indices_ALL_386.csv",
-    Path(r"D:\hx_UAV_data_processing\object_based_tree_hsi\ALL_386_FINAL\VNIR_spectra_indices_ALL_386.csv"),
-
-    # Older consensus-only fallback.
-    DATA_DIR / "master_tree_spectra_CONSENSUS.csv",
-    APP_DIR / "master_tree_spectra_CONSENSUS.csv",
-    Path(r"D:\hx_UAV_data_processing\object_based_tree_hsi\spectral_consensus_qc\master_tree_spectra_CONSENSUS.csv"),
-]
-
-# Optional full SWIR consensus spectrum used ONLY for validation/visualization.
-# Exact wavelengths are encoded in the output column names (WL_<nm>), so no
-# separate SWIR wavelength-map file is required.
-SWIR_SPECTRAL_CSV_CANDIDATES = [
-    # Complete 386-tree SWIR spectra. VISUALIZATION ONLY.
-    DATA_DIR / "SWIR_spectra_indices_ALL_386.csv",
-    APP_DIR / "SWIR_spectra_indices_ALL_386.csv",
-    Path(r"D:\hx_UAV_data_processing\object_based_tree_swir\ALL_386_FINAL\SWIR_spectra_indices_ALL_386.csv"),
-
-    # Older full-spectrum fallbacks.
-    DATA_DIR / "master_tree_swir_spectra_ALL.csv",
-    APP_DIR / "master_tree_swir_spectra_ALL.csv",
-    Path(r"D:\hx_UAV_data_processing\object_based_tree_swir\full_spectral_all_trees\master_tree_swir_spectra_ALL.csv"),
-    DATA_DIR / "master_tree_swir_spectra_CONSENSUS.csv",
-    APP_DIR / "master_tree_swir_spectra_CONSENSUS.csv",
-    Path(r"D:\hx_UAV_data_processing\object_based_tree_swir\full_spectral_consensus\master_tree_swir_spectra_CONSENSUS.csv"),
-]
-
-# Optional all-tree SWIR index inventory used for extra inspection fields.
-# The finalized Water classification itself is already frozen upstream in the
-# ALL-386 multidomain database; this optional inventory does not recalculate it.
-SWIR_ALL_INDEX_CANDIDATES = [
-    DATA_DIR / "master_tree_SWIR_indices_ALL_386.csv",
-    APP_DIR / "master_tree_SWIR_indices_ALL_386.csv",
-    Path(r"D:\hx_UAV_data_processing\object_based_tree_swir_qc\all_tree_index_inventory\master_tree_SWIR_indices_ALL_386.csv"),
-]
-
-# Final operational thresholds.
-# Preferred source is thresholds_FINAL_ALL386.json generated from the harmonized
-# complete-386 database. The numeric blocks below are legacy fallbacks only.
-_LEGACY_BIO_THRESHOLDS = {
-    "NDRE_LOW_MAX": 0.2047129778647948,
-    "CIRED_LOW_MAX": 0.5487572048699663,
-    "REP_LOW_MAX_NM": 725.3890241067692,
-    "PSRI_HIGH_MIN": 0.2317542293068353,
-    "SIPI_HIGH_MIN": 1.6044129002460532,
-    "ARI1_HIGH_MIN": 4.409562434704582,
-}
-
-_LEGACY_WATER_SENSITIVITY_THRESHOLDS = {
-    "P20": {"WBI_LOW_MAX": 0.9732224384098488, "PRI_LOW_MAX": -0.0905354641709804,
-            "NDMI2_HIGH_MIN": -0.1563689890814745, "NDSI_RWC_LOW_MAX": 0.23842041377519282},
-    "P25": {"WBI_LOW_MAX": 0.9780581745028392, "PRI_LOW_MAX": -0.08910375378375263,
-            "NDMI2_HIGH_MIN": -0.17834779593229538, "NDSI_RWC_LOW_MAX": 0.25159298573596856},
-    "P30": {"WBI_LOW_MAX": 0.9835634253103394, "PRI_LOW_MAX": -0.08797404072436948,
-            "NDMI2_HIGH_MIN": -0.19210124039554718, "NDSI_RWC_LOW_MAX": 0.26483841514836876},
-}
-
-_LEGACY_BIO_SENSITIVITY_THRESHOLDS = {
-    "P20": {"NDRE": 0.18991320677124718, "CIRED": 0.5020010800931471, "REP": 725.0965727700146,
-            "PSRI": 0.24515380157382927, "SIPI": 1.6691380599575552, "ARI1": 4.560504481288227},
-    "P25": {"NDRE": 0.2047129778647948, "CIRED": 0.5487572048699663, "REP": 725.3890241067692,
-            "PSRI": 0.2317542293068353, "SIPI": 1.6044129002460532, "ARI1": 4.409562434704582},
-    "P30": {"NDRE": 0.21786641970173387, "CIRED": 0.6123779812211838, "REP": 725.6065279573306,
-            "PSRI": 0.21685585761922752, "SIPI": 1.56515408797565, "ARI1": 4.274624848018448},
-}
-
-
-def _load_all386_threshold_config():
-    for p in THRESHOLD_JSON_CANDIDATES:
-        if Path(p).exists():
-            try:
-                cfg = json.loads(Path(p).read_text(encoding="utf-8"))
-                water = cfg.get("water_sensitivity_thresholds", {})
-                bio = cfg.get("bio_sensitivity_thresholds", {})
-                if all(k in water for k in ["P20", "P25", "P30"]) and all(k in bio for k in ["P20", "P25", "P30"]):
-                    return cfg, Path(p)
-            except Exception:
-                pass
-    return None, None
-
-
-_ALL386_THRESHOLD_CONFIG, _ALL386_THRESHOLD_PATH = _load_all386_threshold_config()
-
-if _ALL386_THRESHOLD_CONFIG is not None:
-    WATER_SENSITIVITY_THRESHOLDS = _ALL386_THRESHOLD_CONFIG["water_sensitivity_thresholds"]
-    BIO_SENSITIVITY_THRESHOLDS = _ALL386_THRESHOLD_CONFIG["bio_sensitivity_thresholds"]
-    BIO_THRESHOLDS = {
-        "NDRE_LOW_MAX": BIO_SENSITIVITY_THRESHOLDS["P25"]["NDRE"],
-        "CIRED_LOW_MAX": BIO_SENSITIVITY_THRESHOLDS["P25"]["CIRED"],
-        "REP_LOW_MAX_NM": BIO_SENSITIVITY_THRESHOLDS["P25"]["REP"],
-        "PSRI_HIGH_MIN": BIO_SENSITIVITY_THRESHOLDS["P25"]["PSRI"],
-        "SIPI_HIGH_MIN": BIO_SENSITIVITY_THRESHOLDS["P25"]["SIPI"],
-        "ARI1_HIGH_MIN": BIO_SENSITIVITY_THRESHOLDS["P25"]["ARI1"],
-    }
-else:
-    WATER_SENSITIVITY_THRESHOLDS = _LEGACY_WATER_SENSITIVITY_THRESHOLDS
-    BIO_SENSITIVITY_THRESHOLDS = _LEGACY_BIO_SENSITIVITY_THRESHOLDS
-    BIO_THRESHOLDS = _LEGACY_BIO_THRESHOLDS
-
-# Final fixed-pair field-reference validation package.
-# These files are generated upstream by Steps 5–7 and are READ-ONLY in the app.
-# The app does not recompute the validation metrics or production classifications.
-VALIDATION_BASE_LOCAL = Path(
-    r"E:\SIROHI_OLD\New Folder\GROUND_VALIDATION_AUDIT"
-    r"\FINAL_SPECTRAL_INDEX_VALIDATION"
-)
-
-VALIDATION_PAIR_CANDIDATES = [
-    DATA_DIR / "STEP7_final_pair_validation_summary.csv",
-    APP_DIR / "STEP7_final_pair_validation_summary.csv",
-    VALIDATION_BASE_LOCAL / "STEP7_FINAL_VALIDATION_PACKAGE" / "STEP7_final_pair_validation_summary.csv",
-]
-
-VALIDATION_DOMAIN_CANDIDATES = [
-    DATA_DIR / "STEP7_domain_threshold_side_agreement.csv",
-    APP_DIR / "STEP7_domain_threshold_side_agreement.csv",
-    VALIDATION_BASE_LOCAL / "STEP7_FINAL_VALIDATION_PACKAGE" / "STEP7_domain_threshold_side_agreement.csv",
-]
-
-VALIDATION_INDEX_CANDIDATES = [
-    DATA_DIR / "STEP7_index_threshold_side_agreement.csv",
-    APP_DIR / "STEP7_index_threshold_side_agreement.csv",
-    VALIDATION_BASE_LOCAL / "STEP7_FINAL_VALIDATION_PACKAGE" / "STEP7_index_threshold_side_agreement.csv",
-]
-
-VALIDATION_PAYLOAD_CANDIDATES = [
-    DATA_DIR / "STEP7_app_validation_payload.json",
-    APP_DIR / "STEP7_app_validation_payload.json",
-    VALIDATION_BASE_LOCAL / "STEP7_FINAL_VALIDATION_PACKAGE" / "STEP7_app_validation_payload.json",
-]
-
-VALIDATION_SPECTRA_CANDIDATES = [
-    DATA_DIR / "STEP5_ground_UAV_VNIR_resampled_spectra.csv",
-    APP_DIR / "STEP5_ground_UAV_VNIR_resampled_spectra.csv",
-    VALIDATION_BASE_LOCAL / "STEP5_GROUND_UAV_VNIR" / "STEP5_ground_UAV_VNIR_resampled_spectra.csv",
-]
-
-VALIDATION_INDEX_LONG_CANDIDATES = [
-    DATA_DIR / "STEP6_ground_vs_UAV_index_validation_long.csv",
-    APP_DIR / "STEP6_ground_vs_UAV_index_validation_long.csv",
-    VALIDATION_BASE_LOCAL / "STEP6_FINAL_VALIDATION_ASSESSMENT" / "STEP6_ground_vs_UAV_index_validation_long.csv",
-]
-
-WAVELENGTH_MAP_CANDIDATES = [
-    DATA_DIR / "band_wavelengths.csv",
-    DATA_DIR / "wavelength_mapping.csv",
-    DATA_DIR / "band_mapping_by_strip.csv",
-    APP_DIR / "band_wavelengths.csv",
-    APP_DIR / "wavelength_mapping.csv",
-    Path(r"D:\hx_UAV_data_processing\object_based_tree_hsi\band_wavelengths.csv"),
-]
-
-STRUCTURE_THRESHOLDS = {
-    "H_P95_P20_M": 1.492920999526977,
-    "H_P95_P25_M": 1.6373457133769989,
-    "H_P95_P30_M": 1.7331793653964995,
-    "H_IQR_P75_M": 1.3969939574599266,
-    "RASTER_CHM_P95_P25_M": 1.413568115234375,
-}
-
-DEFAULT_TREE_SPACING_M = 5.5
-DEFAULT_ROW_DISTANCE_THRESHOLD_M = 2.5
-DEFAULT_GRID_ANGLE_DEG = 75.0
-DEFAULT_MAX_EMPTY_SPACE_M = 20.0
-
+ORCHARD_GLB_PART_PREFIX = "orchard_pointcloud_WEB_RGB.glb.part"
+ORCHARD_GLB_PART_MANIFEST = DATA_DIR / "orchard_pointcloud_WEB_RGB.parts.json"
 
 # =============================================================================
 # 1. GENERAL HELPERS
@@ -561,6 +385,340 @@ def reconstruct_final_database(master: pd.DataFrame, structure: pd.DataFrame) ->
         "biochemical change, disease, or another factor caused the structural condition."
     )
     return df
+
+
+
+# =============================================================================
+# 2B. OPTIONAL 3D ORCHARD VIEWER
+# =============================================================================
+
+def _find_orchard_glb_parts():
+    """Find and order split GLB byte chunks inside data/."""
+    return sorted(
+        p for p in DATA_DIR.glob(f"{ORCHARD_GLB_PART_PREFIX}*")
+        if p.is_file()
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def _load_glb_base64_single(path_str: str) -> str:
+    """Read a complete GLB and cache its base64 representation."""
+    return base64.b64encode(Path(path_str).read_bytes()).decode("ascii")
+
+
+@st.cache_resource(show_spinner=False)
+def _load_glb_base64_parts(part_paths_tuple) -> str:
+    """Join split GLB byte chunks exactly in memory and base64 encode them."""
+    paths = [Path(p) for p in part_paths_tuple]
+
+    if not paths:
+        raise RuntimeError("No 3D GLB parts were supplied.")
+
+    blob = b"".join(p.read_bytes() for p in paths)
+
+    # Verify against the splitter manifest when available.
+    if ORCHARD_GLB_PART_MANIFEST.exists():
+        manifest = json.loads(
+            ORCHARD_GLB_PART_MANIFEST.read_text(encoding="utf-8")
+        )
+
+        expected_size = int(manifest.get("source_bytes", -1))
+        expected_sha = str(manifest.get("source_sha256", "")).strip().lower()
+
+        if expected_size >= 0 and len(blob) != expected_size:
+            raise RuntimeError(
+                "3D reconstruction failed: byte count does not match the manifest."
+            )
+
+        if expected_sha:
+            actual_sha = hashlib.sha256(blob).hexdigest().lower()
+            if actual_sha != expected_sha:
+                raise RuntimeError(
+                    "3D reconstruction failed: SHA-256 does not match the original GLB."
+                )
+
+    return base64.b64encode(blob).decode("ascii")
+
+
+def _resolve_orchard_3d_source():
+    """
+    Prefer one complete GLB when available.
+    Otherwise use the small split parts from data/.
+    """
+    single = first_existing(ORCHARD_GLB_CANDIDATES)
+
+    if single is not None:
+        return {
+            "kind": "single",
+            "path": Path(single),
+            "parts": [],
+        }
+
+    parts = _find_orchard_glb_parts()
+
+    if parts:
+        return {
+            "kind": "parts",
+            "path": None,
+            "parts": parts,
+        }
+
+    return {
+        "kind": "missing",
+        "path": None,
+        "parts": [],
+    }
+
+
+def render_orchard_3d(source, height: int = 650) -> None:
+    """
+    Render the RGB orchard point cloud inside Streamlit.
+
+    Split repository files are reconstructed only when the user opens
+    the 3D view. Splitting does not remove or alter any point.
+    """
+    if not source or source.get("kind") == "missing":
+        st.info(
+            "3D orchard data not found. Upload either the full GLB or all "
+            "`orchard_pointcloud_WEB_RGB.glb.part###` files to `data/`."
+        )
+        return
+
+    if source["kind"] == "single":
+        glb_path = Path(source["path"])
+        total_mb = glb_path.stat().st_size / (1024 ** 2)
+
+        with st.spinner(f"Preparing 3D orchard viewer ({total_mb:.1f} MB)…"):
+            glb_b64 = _load_glb_base64_single(str(glb_path))
+
+        source_text = f"single GLB · {total_mb:.1f} MiB"
+
+    else:
+        parts = [Path(p) for p in source["parts"]]
+        total_mb = sum(p.stat().st_size for p in parts) / (1024 ** 2)
+
+        with st.spinner(
+            f"Joining {len(parts)} 3D files in memory ({total_mb:.1f} MB total)…"
+        ):
+            glb_b64 = _load_glb_base64_parts(
+                tuple(str(p) for p in parts)
+            )
+
+        source_text = (
+            f"{len(parts)} small repository files joined in memory · "
+            f"{total_mb:.1f} MiB total"
+        )
+
+    viewer_html = f"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{{
+  margin:0;width:100%;height:100%;overflow:hidden;
+  background:#111;font-family:Arial,Helvetica,sans-serif;
+}}
+#viewer{{position:absolute;inset:0}}
+#box{{
+  position:absolute;top:10px;left:10px;z-index:9;
+  background:rgba(0,0,0,.72);color:#fff;
+  padding:9px 11px;border-radius:7px;
+  font-size:13px;line-height:1.35;
+}}
+#status{{margin-top:4px;color:#ddd}}
+#error{{margin-top:4px;color:#ffaaaa;white-space:pre-wrap}}
+</style>
+
+<script type="importmap">
+{{
+  "imports": {{
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+  }}
+}}
+</script>
+</head>
+
+<body>
+<div id="viewer"></div>
+<div id="box">
+  <b>RGB orchard — 3D view</b><br>
+  Drag = rotate · Wheel = zoom · Right drag = pan
+  <div id="status">Preparing 3D point cloud…</div>
+  <div id="error"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
+import {{ GLTFLoader }} from 'three/addons/loaders/GLTFLoader.js';
+
+const viewer = document.getElementById('viewer');
+const statusEl = document.getElementById('status');
+const errorEl = document.getElementById('error');
+
+function setStatus(s){{ statusEl.textContent = s; }}
+function fail(s){{ errorEl.textContent = s; console.error(s); }}
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+
+const camera = new THREE.PerspectiveCamera(
+  48, innerWidth / innerHeight, 0.01, 5000
+);
+
+const renderer = new THREE.WebGLRenderer({{
+  antialias:false,
+  powerPreference:'high-performance'
+}});
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.25));
+renderer.setSize(innerWidth, innerHeight);
+viewer.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.screenSpacePanning = true;
+
+function makeCircleTexture(){{
+  const c = document.createElement('canvas');
+  c.width = 32;
+  c.height = 32;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0,0,32,32);
+  ctx.beginPath();
+  ctx.arc(16,16,14,0,Math.PI*2);
+  ctx.fillStyle = 'white';
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}}
+const circleTexture = makeCircleTexture();
+
+const GLB_BASE64 = "{glb_b64}";
+
+function decodeBase64(base64){{
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0; i<binary.length; i++) {{
+    bytes[i] = binary.charCodeAt(i);
+  }}
+  return bytes.buffer;
+}}
+
+function showCloud(gltf){{
+  const root = gltf.scene;
+  let totalPoints = 0;
+  let pointObjects = 0;
+
+  root.traverse((obj) => {{
+    if(!obj.isPoints) return;
+
+    pointObjects += 1;
+    const pos = obj.geometry?.attributes?.position;
+    if(pos) totalPoints += pos.count;
+
+    obj.material = new THREE.PointsMaterial({{
+      size:1.6,
+      sizeAttenuation:false,
+      vertexColors:true,
+      map:circleTexture,
+      alphaTest:0.45,
+      transparent:false,
+      depthWrite:true
+    }});
+  }});
+
+  if(pointObjects === 0){{
+    setStatus('GLB loaded but no point-cloud object was found.');
+    fail('No THREE.Points primitive was detected.');
+    return;
+  }}
+
+  scene.add(root);
+
+  const box = new THREE.Box3().setFromObject(root);
+  if(box.isEmpty()){{
+    setStatus('3D cloud has empty bounds.');
+    return;
+  }}
+
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const d = Math.max(size.x, size.y, size.z);
+
+  controls.target.copy(center);
+
+  camera.position.set(
+    center.x + d * 0.80,
+    center.y - d * 1.00,
+    center.z + d * 0.55
+  );
+
+  camera.near = Math.max(0.01, d / 10000);
+  camera.far = Math.max(1000, d * 30);
+  camera.updateProjectionMatrix();
+
+  controls.minDistance = Math.max(0.2, d * 0.002);
+  controls.maxDistance = d * 8;
+  controls.update();
+
+  setStatus(
+    'Loaded: ' + totalPoints.toLocaleString() +
+    ' RGB points · circular points · 1.6 px'
+  );
+}}
+
+const loader = new GLTFLoader();
+
+setTimeout(() => {{
+  try {{
+    setStatus('Decoding 3D orchard…');
+    const arrayBuffer = decodeBase64(GLB_BASE64);
+
+    setStatus('Building 3D scene…');
+    loader.parse(
+      arrayBuffer,
+      '',
+      showCloud,
+      (err) => {{
+        setStatus('Failed to parse 3D orchard.');
+        fail(err?.message || String(err));
+      }}
+    );
+  }} catch(err) {{
+    setStatus('Failed to prepare 3D orchard.');
+    fail(err?.message || String(err));
+  }}
+}}, 60);
+
+addEventListener('resize', () => {{
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}});
+
+function animate(){{
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}}
+animate();
+</script>
+</body>
+</html>
+"""
+
+    components.html(
+        viewer_html,
+        height=height,
+        scrolling=False,
+    )
+
+    st.caption(f"3D source: {source_text}")
 
 
 # =============================================================================
@@ -2028,29 +2186,58 @@ with tab_map:
         c2.metric("Share of orchard", f"{100 * len(target_gdf) / len(gdf):.1f}%")
         c3.metric("Total mapped trees", len(gdf))
 
-    center = [gdf.geometry.centroid.y.mean(), gdf.geometry.centroid.x.mean()]
-    m = folium.Map(location=center, zoom_start=18, max_zoom=22, tiles="CartoDB positron")
-    folium.GeoJson(
-        gdf,
-        style_function=lambda _: {"fillColor": "#D0D0D0", "color": "#777777", "weight": 0.7, "fillOpacity": 0.05},
-        name="All tree crowns",
-    ).add_to(m)
+    map_view_mode = st.radio(
+        "Map view",
+        ["2D scenario map", "3D RGB orchard"],
+        horizontal=True,
+        key="map_view_mode",
+        help=(
+            "2D shows the rule-based highlighted crowns and popups. "
+            "3D is a visualization-only RGB point-cloud view of the orchard."
+        ),
+    )
 
-    if view == "GAPS":
-        for _, row in gaps_gdf.iterrows():
-            folium.CircleMarker(
-                [row.geometry.y, row.geometry.x], radius=5, color="#C0392B", fill=True, fill_opacity=.9,
-                tooltip="Calculated planting gap"
-            ).add_to(m)
+    if map_view_mode == "3D RGB orchard":
+        orchard_3d_source = _resolve_orchard_3d_source()
+
+        if orchard_3d_source["kind"] == "missing":
+            st.warning(
+                "3D orchard data is missing. For GitHub/browser deployment, "
+                "upload all `orchard_pointcloud_WEB_RGB.glb.part###` files "
+                "and `orchard_pointcloud_WEB_RGB.parts.json` into `data/`."
+            )
+        else:
+            render_orchard_3d(orchard_3d_source, height=650)
+            st.caption(
+                "Visualization only: RGB-coloured UAV point cloud. "
+                "If stored as split files, the exact GLB is reconstructed in "
+                "memory with no loss of points or RGB values. This view does "
+                "not alter Water, Biochemical, Structure, or validation results."
+            )
     else:
-        add_target_layer(m, target_gdf, view)
+        center = [gdf.geometry.centroid.y.mean(), gdf.geometry.centroid.x.mean()]
+        m = folium.Map(location=center, zoom_start=18, max_zoom=22, tiles="CartoDB positron")
+        folium.GeoJson(
+            gdf,
+            style_function=lambda _: {"fillColor": "#D0D0D0", "color": "#777777", "weight": 0.7, "fillOpacity": 0.05},
+            name="All tree crowns",
+        ).add_to(m)
 
-    if show_field_validation_trees and not validation_pair_df.empty:
-        add_field_validation_layer(m, gdf, validation_pair_df)
+        if view == "GAPS":
+            for _, row in gaps_gdf.iterrows():
+                folium.CircleMarker(
+                    [row.geometry.y, row.geometry.x], radius=5, color="#C0392B", fill=True, fill_opacity=.9,
+                    tooltip="Calculated planting gap"
+                ).add_to(m)
+        else:
+            add_target_layer(m, target_gdf, view)
 
-    folium.LayerControl(collapsed=True).add_to(m)
-    st_folium(m, height=650, use_container_width=True)
-    st.caption("Hover = quick evidence. Click = persistent popup. No Tree-ID selection is required.")
+        if show_field_validation_trees and not validation_pair_df.empty:
+            add_field_validation_layer(m, gdf, validation_pair_df)
+
+        folium.LayerControl(collapsed=True).add_to(m)
+        st_folium(m, height=650, use_container_width=True)
+        st.caption("Hover = quick evidence. Click = persistent popup. No Tree-ID selection is required.")
 
     if view != "GAPS" and not target_gdf.empty:
         col1, col2 = st.columns(2)
