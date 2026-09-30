@@ -1679,7 +1679,14 @@ def plot_simple_ground_uav_reference(
     tree_id,
     reference_spectrum=None,
 ):
-    """Main clean validation plot: Ground vs matched UAV vs orchard Reference."""
+    """
+    Main validation plot: independently min-max normalized spectral shapes.
+
+    Each displayed curve is scaled to 0–1 so the figure emphasizes spectral
+    shape rather than absolute reflectance magnitude. The Pearson r, SAM and
+    RMSE cards remain the finalized Step-5 metrics calculated from the paired
+    resampled reflectance spectra; they are not recalculated from this plot.
+    """
     if spectra_df is None or spectra_df.empty:
         return None
 
@@ -1698,14 +1705,30 @@ def plot_simple_ground_uav_reference(
     ground = pd.to_numeric(d["ground_interpolated"], errors="coerce").to_numpy(float)
     uav = pd.to_numeric(d["uav_representative"], errors="coerce").to_numpy(float)
 
+    def minmax_shape(y):
+        y = np.asarray(y, dtype=float)
+        out = np.full_like(y, np.nan, dtype=float)
+        good = np.isfinite(y)
+        if good.sum() < 2:
+            return out
+        lo = np.nanmin(y[good])
+        hi = np.nanmax(y[good])
+        if not np.isfinite(lo) or not np.isfinite(hi) or abs(hi - lo) <= 1e-12:
+            return out
+        out[good] = (y[good] - lo) / (hi - lo)
+        return out
+
+    ground_n = minmax_shape(ground)
+    uav_n = minmax_shape(uav)
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=x, y=ground, mode="lines",
+        x=x, y=ground_n, mode="lines",
         name="Ground spectrum",
         connectgaps=False,
     ))
     fig.add_trace(go.Scatter(
-        x=x, y=uav, mode="lines",
+        x=x, y=uav_n, mode="lines",
         name=f"UAV Tree {tree_id}",
         connectgaps=False,
     ))
@@ -1715,25 +1738,25 @@ def plot_simple_ground_uav_reference(
         ry = np.asarray(reference_spectrum["reflectance"], dtype=float)
         good = np.isfinite(rx) & np.isfinite(ry)
         if good.sum() >= 3:
-            # Interpolate the orchard reference to the paired UAV wavelengths.
             ref_interp = np.interp(x, rx[good], ry[good], left=np.nan, right=np.nan)
+            ref_n = minmax_shape(ref_interp)
             fig.add_trace(go.Scatter(
-                x=x, y=ref_interp, mode="lines",
+                x=x, y=ref_n, mode="lines",
                 name="Reference spectrum",
                 line=dict(dash="dash"),
                 connectgaps=False,
             ))
 
     fig.update_layout(
-        title=f"Ground vs UAV spectrum — Tree {tree_id}",
+        title=f"Normalized spectral shape — Ground vs UAV Tree {tree_id}",
         xaxis_title="Wavelength (nm)",
-        yaxis_title="Reflectance",
+        yaxis_title="Normalized reflectance (0–1)",
+        yaxis=dict(range=[-0.03, 1.03]),
         height=500,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         margin=dict(l=20, r=20, t=75, b=20),
     )
     return fig
-
 
 def simple_validation_interpretation(sample_id, tree_id, row):
     """Short user-facing interpretation; no new diagnostic class is created."""
@@ -2277,6 +2300,11 @@ with tab_validation:
 
         if main_fig is not None:
             st.plotly_chart(main_fig, use_container_width=True)
+            st.caption(
+                "Each curve is independently normalized to 0–1 to compare spectral shape. "
+                "Pearson r, SAM and RMSE below are the finalized Step-5 paired metrics "
+                "calculated from the resampled reflectance spectra."
+            )
         else:
             st.info(
                 "The paired ground/UAV spectrum for this tree could not be loaded."
