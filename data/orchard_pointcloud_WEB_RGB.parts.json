@@ -1,0 +1,30 @@
+{
+  "source_filename": "orchard_pointcloud_WEB_RGB.glb",
+  "source_bytes": 16575436,
+  "source_size_MiB": 15.807567596435547,
+  "source_sha256": "9f23c8a2a0f30a267ca7eaa21e35d3c4c23da8a08848642ea2a9e9d455a42be7",
+  "part_size_MiB": 4,
+  "part_count": 4,
+  "parts": [
+    {
+      "name": "orchard_pointcloud_WEB_RGB.glb.part001",
+      "bytes": 4194304,
+      "sha256": "1ca9b084aef597695a7cb1e4229e0162f1243fc09e62d15b3bd16f488727cfdc"
+    },
+    {
+      "name": "orchard_pointcloud_WEB_RGB.glb.part002",
+      "bytes": 4194304,
+      "sha256": "18aac625459f0754523bd493b5a878ef33e1f34b34a8f4b7b6ec153ee1875b2d"
+    },
+    {
+      "name": "orchard_pointcloud_WEB_RGB.glb.part003",
+      "bytes": 4194304,
+      "sha256": "aee45898c0307b0a32d8626717ef3e2dfba26724847864f84d22245c3f889bb0"
+    },
+    {
+      "name": "orchard_pointcloud_WEB_RGB.glb.part004",
+      "bytes": 3992524,
+      "sha256": "fb3e10d24e9487224dad5ff586fdbbdeac37e000efcc214e4b5e65235748f908"
+    }
+  ]
+}
