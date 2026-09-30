@@ -2493,22 +2493,17 @@ with tab_validation:
             count_lo = float(counts.quantile(0.05)) if len(counts) else np.nan
             count_hi = float(counts.quantile(0.95)) if len(counts) else np.nan
 
-            mean_j = float(jvals.mean()) if len(jvals) else np.nan
             median_j = float(jvals.median()) if len(jvals) else np.nan
             j_lo = float(jvals.quantile(0.05)) if len(jvals) else np.nan
             j_hi = float(jvals.quantile(0.95)) if len(jvals) else np.nan
 
-            b1, b2, b3, b4 = st.columns(4)
+            b1, b2, b3 = st.columns(3)
             b1.metric("Operational P25 trees", operational_n)
             b2.metric(
                 "Bootstrap median trees",
                 f"{median_count:.0f}" if np.isfinite(median_count) else "NA",
             )
             b3.metric(
-                "Mean Jaccard",
-                f"{mean_j:.3f}" if np.isfinite(mean_j) else "NA",
-            )
-            b4.metric(
                 "Median Jaccard",
                 f"{median_j:.3f}" if np.isfinite(median_j) else "NA",
             )
