@@ -1868,7 +1868,7 @@ tab_map, tab_evidence, tab_summary, tab_validation, tab_methods = st.tabs([
     "🗺️ Map & Scenarios",
     "🧭 Evidence Explained",
     "📊 Orchard Summary",
-    "🧪 Spectral Validation",
+    "🧪 Validation",
     "📘 Methods",
 ])
 
@@ -2123,7 +2123,7 @@ with tab_summary:
 
 
 with tab_validation:
-    st.header("Ground–UAV spectral validation")
+    st.header("1. Ground–UAV validation")
     st.write(
         "Select one of the five displayed measured trees to compare the ground spectrum "
         "with the corresponding UAV spectrum."
@@ -2342,6 +2342,177 @@ with tab_validation:
                     )
 
 
+    st.divider()
+    st.header("2. Statistical robustness")
+    st.caption(
+        "This section checks whether the UAV rule-based groups remain stable "
+        "when thresholds move slightly, and whether highlighted trees differ "
+        "statistically from valid comparison trees."
+    )
+
+    if view == "GAPS":
+        st.info(
+            "Select Water, Biochemical, Low Canopy Stature, Water + Biochemical, "
+            "or the three-domain scenario to view statistical robustness."
+        )
+    else:
+        current_mask = target_mask.astype(bool)
+        reference_mask = comparison_reference_mask(gdf, view).astype(bool)
+
+        # ----------------------------------------------------------
+        # A. Threshold stability / Jaccard
+        # ----------------------------------------------------------
+        st.subheader("Threshold stability")
+
+        schemes = ["P20", "P25", "P30"]
+        runs = {s: sensitivity_target_mask(gdf, view, s) for s in schemes}
+
+        count_p20 = int(runs["P20"].sum())
+        count_p25 = int(runs["P25"].sum())
+        count_p30 = int(runs["P30"].sum())
+
+        j20_25 = jaccard(runs["P20"], runs["P25"])
+        j25_30 = jaccard(runs["P25"], runs["P30"])
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("P20 trees", count_p20)
+        c2.metric("P25 trees", count_p25)
+        c3.metric("P30 trees", count_p30)
+        c4.metric(
+            "Jaccard P20↔P25",
+            f"{j20_25:.3f}" if np.isfinite(j20_25) else "NA",
+        )
+        c5.metric(
+            "Jaccard P25↔P30",
+            f"{j25_30:.3f}" if np.isfinite(j25_30) else "NA",
+        )
+
+        st.caption(
+            "P25 is the operational rule. P20 and P30 are stricter/more-inclusive "
+            "sensitivity checks. Jaccard = 1 means the selected tree sets are identical; "
+            "lower values mean greater sensitivity to threshold choice."
+        )
+
+        stability_df = pd.DataFrame(
+            {
+                "Threshold": ["P20", "P25 operational", "P30"],
+                "Highlighted trees": [count_p20, count_p25, count_p30],
+            }
+        )
+        st.plotly_chart(
+            px.bar(
+                stability_df,
+                x="Threshold",
+                y="Highlighted trees",
+                text="Highlighted trees",
+                title="Trees retained under nearby threshold choices",
+            ),
+            use_container_width=True,
+        )
+
+        with st.expander("Show exact P20 / P25 / P30 threshold values", expanded=False):
+            st.dataframe(
+                threshold_table_for_view(view),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        # ----------------------------------------------------------
+        # B. Mann–Whitney U + rank-biserial effect size
+        # ----------------------------------------------------------
+        st.subheader("Highlighted vs comparison trees")
+
+        metrics = [m for m in scenario_metrics(view) if m in gdf.columns]
+        stats_df = comparison_statistics(
+            gdf,
+            current_mask,
+            reference_mask,
+            metrics,
+        )
+
+        if not current_mask.any():
+            st.info("No highlighted trees are available for the selected scenario.")
+        elif not reference_mask.any():
+            st.info("No valid comparison trees are available for the selected scenario.")
+        elif stats_df.empty:
+            st.info("Not enough valid observations for statistical comparison.")
+        else:
+            simple_stats = stats_df.copy()
+
+            rename_map = {
+                "Metric": "Indicator",
+                "Target n": "Highlighted n",
+                "Reference n": "Comparison n",
+                "Target median": "Highlighted median",
+                "Reference median": "Comparison median",
+                "Median difference": "Median difference",
+                "Mann–Whitney p": "Mann–Whitney p",
+                "Rank-biserial": "Rank-biserial effect",
+            }
+            simple_stats = simple_stats.rename(columns=rename_map)
+
+            keep_cols = [
+                c for c in [
+                    "Indicator",
+                    "Highlighted n",
+                    "Comparison n",
+                    "Highlighted median",
+                    "Comparison median",
+                    "Median difference",
+                    "Mann–Whitney p",
+                    "Rank-biserial effect",
+                ]
+                if c in simple_stats.columns
+            ]
+
+            # Only a few summary numbers above the complete compact table.
+            n_tested = len(simple_stats)
+            if "Mann–Whitney p" in simple_stats.columns:
+                pvals = pd.to_numeric(
+                    simple_stats["Mann–Whitney p"], errors="coerce"
+                )
+                n_p005 = int((pvals < 0.05).sum())
+            else:
+                n_p005 = 0
+
+            effect_vals = (
+                pd.to_numeric(
+                    simple_stats.get("Rank-biserial effect"),
+                    errors="coerce",
+                ).abs()
+                if "Rank-biserial effect" in simple_stats.columns
+                else pd.Series(dtype=float)
+            )
+            median_abs_effect = (
+                float(effect_vals.median())
+                if len(effect_vals.dropna())
+                else np.nan
+            )
+
+            a, b, c = st.columns(3)
+            a.metric("Indicators tested", n_tested)
+            b.metric("p < 0.05", n_p005)
+            c.metric(
+                "Median |effect size|",
+                f"{median_abs_effect:.3f}"
+                if np.isfinite(median_abs_effect)
+                else "NA",
+            )
+
+            st.dataframe(
+                simple_stats[keep_cols].round(5),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            st.caption(
+                "Mann–Whitney p tests whether the highlighted and comparison "
+                "distributions differ. Rank-biserial effect size shows the "
+                "magnitude and direction of that separation. These statistics "
+                "support group differentiation; they do not establish biological causality."
+            )
+
+
 with tab_methods:
     st.header("How the system decides")
     st.markdown("""
@@ -2353,11 +2524,11 @@ with tab_methods:
 **Spectral validation display** — VNIR and SWIR consensus curves are descriptive validation layers only. SWIR water-rule bands are shown at their exact Headwall centres; spectral curves do not create additional classification votes.
     """)
 
-    st.subheader("Ground–UAV spectral validation")
+    st.subheader("Validation framework")
     st.write(
-        "Five displayed ground spectra are compared with their corresponding UAV tree spectra. "
-        "The main page shows Pearson correlation, spectral angle (SAM), RMSE and a simple visual reference spectrum. A compact statistical summary is available below the pair-wise comparison. "
-        "Detailed index checks are available only on demand. The application reads the finalized upstream validation products and does not recompute them."
+        "Validation has two parts. First, five displayed ground spectra are compared with their corresponding UAV tree spectra using Pearson correlation, spectral angle (SAM) and RMSE. "
+        "Second, internal statistical robustness is checked using P20/P25/P30 threshold sensitivity with Jaccard overlap, and Mann–Whitney U with rank-biserial effect size for highlighted versus comparison trees. "
+        "Detailed index checks remain available only on demand."
     )
 
     st.subheader("Operational thresholds")
