@@ -107,7 +107,7 @@ ORCHARD_GLB_CANDIDATES = [
 # GitHub/browser-safe split GLB support.
 # These are consecutive byte chunks of the exact same GLB; no points are lost.
 ORCHARD_GLB_PART_PREFIX = "orchard_pointcloud_WEB_RGB.glb.part"
-ORCHARD_GLB_PART_MANIFEST = STATIC_DIR / "orchard_pointcloud_WEB_RGB.parts.json"
+ORCHARD_GLB_PART_MANIFEST = DATA_DIR / "orchard_pointcloud_WEB_RGB.parts.json"
 
 
 # Coordinate alignment for the web GLB.
@@ -602,13 +602,70 @@ def reconstruct_final_database(master: pd.DataFrame, structure: pd.DataFrame) ->
 
 def _find_orchard_glb_parts():
     """
-    Find the browser-fetchable split GLB files from the repository static/
-    directory. They are intentionally NOT loaded into Python memory.
+    Find the split GLB files where the user already uploaded them: data/.
+
+    The files remain in data/. For browser-side loading, the app mirrors them
+    into static/ at runtime without changing the originals.
     """
     return sorted(
-        p for p in STATIC_DIR.glob(f"{ORCHARD_GLB_PART_PREFIX}*")
+        p for p in DATA_DIR.glob(f"{ORCHARD_GLB_PART_PREFIX}*")
         if p.is_file()
     )
+
+
+@st.cache_resource(show_spinner=False)
+def _prepare_static_glb_parts():
+    """
+    Mirror split GLB files from data/ to static/ so the browser can fetch them.
+
+    This avoids asking the user to reorganize the repository. Existing files
+    are reused; only missing/different static copies are written.
+    """
+    import shutil
+
+    parts = _find_orchard_glb_parts()
+    if not parts:
+        return []
+
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+
+    mirrored = []
+
+    for src_path in parts:
+        dst_path = STATIC_DIR / src_path.name
+
+        needs_copy = True
+        if dst_path.exists():
+            try:
+                needs_copy = (
+                    dst_path.stat().st_size != src_path.stat().st_size
+                )
+            except Exception:
+                needs_copy = True
+
+        if needs_copy:
+            shutil.copyfile(src_path, dst_path)
+
+        mirrored.append(dst_path)
+
+    # Mirror manifest too when present.
+    if ORCHARD_GLB_PART_MANIFEST.exists():
+        manifest_dst = STATIC_DIR / ORCHARD_GLB_PART_MANIFEST.name
+
+        needs_copy = True
+        if manifest_dst.exists():
+            try:
+                needs_copy = (
+                    manifest_dst.stat().st_size
+                    != ORCHARD_GLB_PART_MANIFEST.stat().st_size
+                )
+            except Exception:
+                needs_copy = True
+
+        if needs_copy:
+            shutil.copyfile(ORCHARD_GLB_PART_MANIFEST, manifest_dst)
+
+    return mirrored
 
 
 def _resolve_orchard_3d_source():
@@ -619,14 +676,18 @@ def _resolve_orchard_3d_source():
     The GLB parts are served by Streamlit static-file serving and fetched
     directly by the browser. Python never joins/base64-embeds the ~25 MB GLB.
     """
-    parts = _find_orchard_glb_parts()
+    source_parts = _find_orchard_glb_parts()
 
-    if not parts:
+    if not source_parts:
         return {
             "kind": "missing",
             "parts": [],
             "total_bytes": 0,
         }
+
+    # Keep the user's files in data/, but prepare browser-fetchable copies
+    # automatically in static/.
+    parts = _prepare_static_glb_parts()
 
     manifest = {}
     if ORCHARD_GLB_PART_MANIFEST.exists():
@@ -643,7 +704,7 @@ def _resolve_orchard_3d_source():
         if str(item.get("name", "")).strip()
     ]
 
-    actual_names = [p.name for p in parts]
+    actual_names = [p.name for p in source_parts]
 
     if expected_names and actual_names != expected_names:
         return {
@@ -657,7 +718,7 @@ def _resolve_orchard_3d_source():
         }
 
     expected_size = manifest.get("source_bytes")
-    actual_size = sum(p.stat().st_size for p in parts)
+    actual_size = sum(p.stat().st_size for p in source_parts)
 
     if expected_size is not None:
         try:
@@ -906,7 +967,7 @@ def render_orchard_3d(source, scene_payload, height: int = 690) -> None:
     """
     Browser-side 3D viewer.
 
-    Each 4 MiB GLB part is fetched directly from Streamlit's static server.
+    The app keeps your split files in data/, mirrors them to static/ at runtime, and the browser fetches those small copies directly.
     This avoids one huge base64/WebSocket message, which is important on
     restrictive proxy/firewall networks.
     """
