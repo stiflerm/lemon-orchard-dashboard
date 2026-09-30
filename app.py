@@ -2574,6 +2574,13 @@ with tab_validation:
         # ----------------------------------------------------------
         st.subheader("Group separation — Mann–Whitney and effect size")
 
+        st.write(
+            "**Mann–Whitney U** checks whether values in the highlighted trees are "
+            "systematically different from the comparison trees without assuming a normal distribution. "
+            "**Rank-biserial effect size** describes how strongly the two groups are separated; "
+            "values closer to 1 in absolute magnitude indicate stronger separation."
+        )
+
         metrics = [m for m in scenario_metrics(view) if m in gdf.columns]
         stats_df = comparison_statistics(
             gdf,
@@ -2603,6 +2610,87 @@ with tab_validation:
             }
             simple_stats = simple_stats.rename(columns=rename_map)
 
+            pvals = (
+                pd.to_numeric(simple_stats["Mann–Whitney p"], errors="coerce")
+                if "Mann–Whitney p" in simple_stats.columns
+                else pd.Series(dtype=float)
+            )
+            effects = (
+                pd.to_numeric(simple_stats["Rank-biserial effect"], errors="coerce")
+                if "Rank-biserial effect" in simple_stats.columns
+                else pd.Series(dtype=float)
+            )
+
+            n_tested = int(len(simple_stats))
+            n_sig = int((pvals < 0.05).sum()) if len(pvals) else 0
+            median_abs_effect = (
+                float(effects.abs().median())
+                if len(effects.dropna())
+                else np.nan
+            )
+
+            a, b, c = st.columns(3)
+            a.metric("Indicators tested", n_tested)
+            b.metric("Significantly different", f"{n_sig}/{n_tested}")
+            c.metric(
+                "Median |effect size|",
+                f"{median_abs_effect:.3f}"
+                if np.isfinite(median_abs_effect)
+                else "NA",
+            )
+
+            if n_tested:
+                if n_sig == n_tested:
+                    sig_text = (
+                        f"All {n_tested} tested indicators show a statistically detectable "
+                        "difference between highlighted and comparison trees (p < 0.05)."
+                    )
+                elif n_sig == 0:
+                    sig_text = (
+                        f"None of the {n_tested} tested indicators reached p < 0.05."
+                    )
+                else:
+                    sig_text = (
+                        f"{n_sig} of {n_tested} tested indicators show a statistically "
+                        "detectable difference between the two groups (p < 0.05)."
+                    )
+            else:
+                sig_text = ""
+
+            if np.isfinite(median_abs_effect):
+                if median_abs_effect >= 0.90:
+                    effect_text = (
+                        "The median absolute rank-biserial effect is very close to 1, "
+                        "indicating near-complete rank separation between the two groups "
+                        "for the typical tested indicator."
+                    )
+                elif median_abs_effect >= 0.70:
+                    effect_text = (
+                        "The median absolute rank-biserial effect indicates strong group separation."
+                    )
+                elif median_abs_effect >= 0.50:
+                    effect_text = (
+                        "The median absolute rank-biserial effect indicates substantial group separation."
+                    )
+                else:
+                    effect_text = (
+                        "The median absolute rank-biserial effect indicates limited-to-moderate group separation."
+                    )
+            else:
+                effect_text = ""
+
+            if sig_text:
+                st.success(sig_text)
+            if effect_text:
+                st.write(effect_text)
+
+            st.caption(
+                "Why this test is used: it checks whether the rule-defined highlighted trees "
+                "are numerically distinct from valid comparison trees across the orchard. "
+                "Because the same indicators also contribute to the rule used to define the groups, "
+                "this is a descriptive group-separation check, not independent biological validation."
+            )
+
             keep_cols = [
                 c for c in [
                     "Indicator",
@@ -2617,52 +2705,12 @@ with tab_validation:
                 if c in simple_stats.columns
             ]
 
-            # Only a few summary numbers above the complete compact table.
-            n_tested = len(simple_stats)
-            if "Mann–Whitney p" in simple_stats.columns:
-                pvals = pd.to_numeric(
-                    simple_stats["Mann–Whitney p"], errors="coerce"
+            with st.expander("Show detailed Mann–Whitney results", expanded=False):
+                st.dataframe(
+                    simple_stats[keep_cols].round(5),
+                    hide_index=True,
+                    use_container_width=True,
                 )
-                n_p005 = int((pvals < 0.05).sum())
-            else:
-                n_p005 = 0
-
-            effect_vals = (
-                pd.to_numeric(
-                    simple_stats.get("Rank-biserial effect"),
-                    errors="coerce",
-                ).abs()
-                if "Rank-biserial effect" in simple_stats.columns
-                else pd.Series(dtype=float)
-            )
-            median_abs_effect = (
-                float(effect_vals.median())
-                if len(effect_vals.dropna())
-                else np.nan
-            )
-
-            a, b, c = st.columns(3)
-            a.metric("Indicators tested", n_tested)
-            b.metric("p < 0.05", n_p005)
-            c.metric(
-                "Median |effect size|",
-                f"{median_abs_effect:.3f}"
-                if np.isfinite(median_abs_effect)
-                else "NA",
-            )
-
-            st.dataframe(
-                simple_stats[keep_cols].round(5),
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            st.caption(
-                "Mann–Whitney tests whether highlighted and comparison distributions differ; "
-                "rank-biserial effect size describes how strongly they are separated. "
-                "Because these same indicators contribute to the rule that defines the groups, "
-                "this is a descriptive group-separation check, not independent validation."
-            )
 
 
 with tab_methods:
