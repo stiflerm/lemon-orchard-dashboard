@@ -1101,11 +1101,17 @@ def build_3d_scene_payload(
                     else:
                         crown_z = float(ORCHARD_CROWN_OVERLAY_Z)
 
+                    ground_sample = sample_map.get(int(tree_id), "")
                     payload["validation"].append({
                         "tree_id": _json_safe_value(tree_id),
-                        "ground_sample": sample_map.get(int(tree_id), ""),
+                        "ground_sample": ground_sample,
                         "rings": rings,
                         "z": round(float(crown_z) + 0.05, 3),
+                        "rows": [
+                            {"label": "Tree ID", "value": _format_3d_display_value(_json_safe_value(tree_id))},
+                            {"label": "Ground sample", "value": str(ground_sample)},
+                            {"label": "Reference", "value": "Field spectroradiometer"},
+                        ],
                     })
 
     # Planting-gap markers.
@@ -1220,6 +1226,26 @@ html,body{{
 #hoverCard .pin{{
   margin-top:7px;opacity:.72;font-size:11px;
 }}
+#mapLegend{{
+  position:absolute;left:12px;bottom:12px;z-index:11;
+  background:rgba(0,0,0,.78);color:#fff;
+  padding:8px 10px;border-radius:7px;
+  font-size:12px;line-height:1.55;
+  pointer-events:none;
+}}
+.legendRow{{display:flex;align-items:center;gap:8px;white-space:nowrap}}
+.legendTarget{{
+  width:13px;height:13px;border-radius:50%;
+  background:{scene_payload.get("target_color", "#E74C3C")};
+  border:3px solid #fff;box-shadow:0 0 0 1px #000;
+  display:inline-block;box-sizing:content-box;
+}}
+.legendReference{{
+  width:16px;height:16px;border-radius:50%;
+  border:4px solid #FFD400;
+  box-shadow:0 0 0 2px #111, 0 0 0 3px #fff;
+  display:inline-block;box-sizing:border-box;
+}}
 #error{{margin-top:4px;color:#ffaaaa;white-space:pre-wrap}}
 </style>
 
@@ -1248,6 +1274,11 @@ html,body{{
   <div class="title" id="cardTitle"></div>
   <div id="cardBody"></div>
   <div class="pin" id="cardPin"></div>
+</div>
+
+<div id="mapLegend">
+  <div class="legendRow"><span class="legendTarget"></span> Selected scenario tree</div>
+  <div class="legendRow"><span class="legendReference"></span> Ground spectroradiometer reference</div>
 </div>
 
 <script type="module">
@@ -1335,7 +1366,7 @@ function ringToShape(ring){{
   return shape;
 }}
 
-function addOutline(ring, color, z, opacity=1.0, width=1){{
+function addOutline(ring, color, z, opacity=1.0, alwaysOnTop=false){{
   if(!ring || ring.length < 2) return;
 
   const pts = ring.map(
@@ -1347,31 +1378,140 @@ function addOutline(ring, color, z, opacity=1.0, width=1){{
     color:new THREE.Color(color),
     transparent:opacity < 1,
     opacity:opacity,
-    depthTest:true,
+    depthTest:!alwaysOnTop,
     depthWrite:false
   }});
 
   const line = new THREE.Line(geometry, material);
-  line.renderOrder = 20;
+  line.renderOrder = alwaysOnTop ? 65 : 20;
   orchardGroup.add(line);
+}}
+
+function ringCenter(ring){{
+  if(!ring || !ring.length) return [0,0];
+
+  let sx=0, sy=0, n=ring.length;
+  // Ignore duplicated closing vertex if present.
+  if(
+    n > 1 &&
+    ring[0][0] === ring[n-1][0] &&
+    ring[0][1] === ring[n-1][1]
+  ) n -= 1;
+
+  for(let i=0;i<n;i++){{
+    sx += ring[i][0];
+    sy += ring[i][1];
+  }}
+
+  return [sx/Math.max(n,1), sy/Math.max(n,1)];
+}}
+
+function makeTargetMarkerTexture(color){{
+  const c=document.createElement('canvas');
+  c.width=96; c.height=96;
+  const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,96,96);
+
+  // Black shadow/edge.
+  ctx.beginPath();
+  ctx.arc(48,48,39,0,Math.PI*2);
+  ctx.fillStyle='#111111';
+  ctx.fill();
+
+  // White contrast ring.
+  ctx.beginPath();
+  ctx.arc(48,48,34,0,Math.PI*2);
+  ctx.fillStyle='#FFFFFF';
+  ctx.fill();
+
+  // Scenario colour.
+  ctx.beginPath();
+  ctx.arc(48,48,27,0,Math.PI*2);
+  ctx.fillStyle=color;
+  ctx.fill();
+
+  // Small white centre makes it readable over dark/bright backgrounds.
+  ctx.beginPath();
+  ctx.arc(48,48,5,0,Math.PI*2);
+  ctx.fillStyle='#FFFFFF';
+  ctx.fill();
+
+  const tex=new THREE.CanvasTexture(c);
+  tex.needsUpdate=true;
+  return tex;
+}}
+
+function makeReferenceMarkerTexture(){{
+  const c=document.createElement('canvas');
+  c.width=96; c.height=96;
+  const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,96,96);
+
+  // Black outer edge.
+  ctx.beginPath();
+  ctx.arc(48,48,39,0,Math.PI*2);
+  ctx.strokeStyle='#111111';
+  ctx.lineWidth=9;
+  ctx.stroke();
+
+  // Bright yellow reference halo.
+  ctx.beginPath();
+  ctx.arc(48,48,31,0,Math.PI*2);
+  ctx.strokeStyle='#FFD400';
+  ctx.lineWidth=12;
+  ctx.stroke();
+
+  // White inner edge keeps the halo visible on both soil and foliage.
+  ctx.beginPath();
+  ctx.arc(48,48,23,0,Math.PI*2);
+  ctx.strokeStyle='#FFFFFF';
+  ctx.lineWidth=5;
+  ctx.stroke();
+
+  const tex=new THREE.CanvasTexture(c);
+  tex.needsUpdate=true;
+  return tex;
+}}
+
+function addScreenMarker(x,y,z,texture,sizePx,kind,userData,renderOrder){{
+  const geometry=new THREE.BufferGeometry();
+  geometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute([x,y,z],3)
+  );
+
+  const material=new THREE.PointsMaterial({{
+    size:sizePx,
+    sizeAttenuation:false,
+    map:texture,
+    transparent:true,
+    alphaTest:0.08,
+    depthTest:false,
+    depthWrite:false
+  }});
+
+  const marker=new THREE.Points(geometry,material);
+  marker.renderOrder=renderOrder;
+  marker.userData.kind=kind;
+  Object.assign(marker.userData,userData || {{}});
+  interactiveObjects.push(marker);
+  orchardGroup.add(marker);
+  return marker;
 }}
 
 const interactiveObjects = [];
 const zOverlay = Number(PAYLOAD.overlay_z || 8.6);
 
-// Optional field-reference validation outlines.
-for(const item of (PAYLOAD.validation || [])){{
-  const itemZ = Number(item.z ?? zOverlay);
-  for(const ring of (item.rings || [])){{
-    addOutline(ring, '#00A6D6', itemZ + 0.015, 0.95);
-  }}
-}}
-
 // Rule-based highlighted crowns.
 const targetColor = PAYLOAD.target_color || '#E74C3C';
+const targetMarkerTexture = makeTargetMarkerTexture(targetColor);
+const referenceMarkerTexture = makeReferenceMarkerTexture();
 
 for(const item of (PAYLOAD.targets || [])){{
-  for(const ring of (item.rings || [])){{
+  const itemZ = Number(item.z ?? zOverlay);
+  const rings = item.rings || [];
+
+  for(const ring of rings){{
     const shape = ringToShape(ring);
     if(!shape) continue;
 
@@ -1379,14 +1519,14 @@ for(const item of (PAYLOAD.targets || [])){{
     const material = new THREE.MeshBasicMaterial({{
       color:new THREE.Color(targetColor),
       transparent:true,
-      opacity:0.30,
+      opacity:0.48,
       side:THREE.DoubleSide,
       depthTest:true,
       depthWrite:false
     }});
 
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.z = Number(item.z ?? zOverlay);
+    mesh.position.z = itemZ;
     mesh.renderOrder = 30;
     mesh.userData.kind = 'tree';
     mesh.userData.tree_id = item.tree_id;
@@ -1394,7 +1534,67 @@ for(const item of (PAYLOAD.targets || [])){{
     interactiveObjects.push(mesh);
     orchardGroup.add(mesh);
 
-    addOutline(ring, targetColor, Number(item.z ?? zOverlay) + 0.015, 1.0);
+    addOutline(
+      ring,
+      targetColor,
+      itemZ + 0.020,
+      1.0,
+      false
+    );
+  }}
+
+  // Constant-screen-size marker remains obvious even when the orchard is zoomed out.
+  if(rings.length){{
+    const center = ringCenter(rings[0]);
+    addScreenMarker(
+      center[0],
+      center[1],
+      itemZ + 0.12,
+      targetMarkerTexture,
+      19,
+      'tree',
+      {{
+        tree_id:item.tree_id,
+        rows:item.rows || []
+      }},
+      60
+    );
+  }}
+}}
+
+// Ground spectroradiometer reference trees.
+// A larger yellow halo is intentionally drawn AFTER the scenario markers.
+// If a reference tree is also flagged, both symbols remain visible.
+for(const item of (PAYLOAD.validation || [])){{
+  const itemZ = Number(item.z ?? zOverlay);
+  const rings = item.rings || [];
+
+  for(const ring of rings){{
+    addOutline(
+      ring,
+      '#FFD400',
+      itemZ + 0.040,
+      1.0,
+      true
+    );
+  }}
+
+  if(rings.length){{
+    const center = ringCenter(rings[0]);
+    addScreenMarker(
+      center[0],
+      center[1],
+      itemZ + 0.16,
+      referenceMarkerTexture,
+      29,
+      'reference',
+      {{
+        tree_id:item.tree_id,
+        ground_sample:item.ground_sample,
+        rows:item.rows || []
+      }},
+      70
+    );
   }}
 }}
 
@@ -1423,11 +1623,19 @@ function showCard(obj, pinned){{
   }}
 
   const rows = obj.userData.rows || [];
-  const isTree = obj.userData.kind === 'tree';
+  const kind = obj.userData.kind;
 
-  cardTitle.textContent = isTree
-    ? 'Tree ' + String(obj.userData.tree_id)
-    : 'Planting gap';
+  if(kind === 'tree'){{
+    cardTitle.textContent = 'Tree ' + String(obj.userData.tree_id);
+  }} else if(kind === 'reference'){{
+    const sample = obj.userData.ground_sample
+      ? ' · Field ' + String(obj.userData.ground_sample)
+      : '';
+    cardTitle.textContent =
+      'Ground reference — Tree ' + String(obj.userData.tree_id) + sample;
+  }} else {{
+    cardTitle.textContent = 'Planting gap';
+  }}
 
   cardBody.innerHTML = '';
 
@@ -1455,6 +1663,7 @@ function showCard(obj, pinned){{
 }}
 
 const raycaster = new THREE.Raycaster();
+raycaster.params.Points.threshold = 1.4;
 const pointer = new THREE.Vector2();
 let pinnedObject = null;
 let hoverObject = null;
@@ -3015,7 +3224,7 @@ if not validation_pair_df.empty:
     show_field_validation_trees = st.sidebar.checkbox(
         "Show field-reference validation trees",
         value=True,
-        help="Adds a dashed outline around the ground↔UAV validation trees shown in the validation page. It does not change the selected scenario.",
+        help="Adds a bright yellow halo to the ground↔UAV spectroradiometer reference trees. It does not change the selected scenario.",
     )
 
 if view == "GAPS":
@@ -3127,10 +3336,10 @@ with tab_map:
             )
         else:
             st.caption(
-                "The selected rule-based trees are highlighted directly over "
-                "their crown footprints. Hover a highlighted crown to see the "
-                "same evidence values previously shown on the 2D map; click to "
-                "keep the popup open."
+                "Selected scenario trees use a high-contrast fixed-size marker "
+                "so they remain visible when zoomed out. Ground spectroradiometer "
+                "reference trees use a larger yellow halo. Hover or click either "
+                "marker for identification/evidence."
             )
 
     if view != "GAPS" and not target_gdf.empty:
